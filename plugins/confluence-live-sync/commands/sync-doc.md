@@ -271,16 +271,36 @@ notes-push direction, and continue on to step 6.
      ```
      Confirmed working end-to-end this way on a real page — this is the only syntax in this HTML
      format that renders a real inline image from a REST-API-uploaded attachment.
-  5. **If `Get-ConfluenceApiToken` returns nothing from any of the three lookups**, don't fail the
+  5. **Immediately after that `<figure>`, append a collapsed Mermaid-source block** — an `expand`
+     (`<details>`) containing the diagram's raw `.mmd` text as-is, verbatim, in a code block:
+     ```html
+     <details><summary>Ver código Mermaid (<basename>.mmd)</summary>
+     <pre><code class="language-mermaid"><raw .mmd file contents, HTML-escaped></code></pre>
+     </details>
+     ```
+     This is collapsed by default (`<details>` with no `open` attribute) so it doesn't clutter the
+     page visually, but it means the page's own markdown export — what `Confluence Sync.md` mirrors
+     back to (step 3/6) — carries the actual Mermaid source next to the image, not just a PNG
+     reference. That's what lets an agent that later reads `Confluence Sync.md` (rather than looking
+     at the rendered page) understand what the flow actually does instead of seeing an opaque image
+     link. HTML-escape the `.mmd` content (`<`, `>`, `&`) before embedding — it's arbitrary Mermaid
+     source, not markup. One expand per diagram, placed right after its own figure, not batched at
+     the end of the page.
+  6. **If `Get-ConfluenceApiToken` returns nothing from any of the three lookups**, don't fail the
      run — extract every `value="..."` label from the diagram's sibling `.drawio` copy if one
      exists (HTML-entity decoded) as a last-resort label-list fallback, and note in the report that
-     the token is missing so the PNG couldn't be rendered/attached.
+     the token is missing so the PNG couldn't be rendered/attached. Still append the collapsed
+     Mermaid-source block from point 5 even in this fallback case — it costs nothing (no attachment
+     upload involved) and is the only context an agent will get about the flow when the image itself
+     couldn't be produced.
 
-  Never paste the raw Mermaid text as a code block on the live page instead of rendering it — a site
-  with no Mermaid-rendering marketplace app installed will only show it as plain/unrendered text or
-  "Error al cargar la extensión," never an actual diagram (confirmed on `pickit.atlassian.net`,
-  2026-09-03 — don't assume every Confluence site this plugin targets has one installed either,
-  since this plugin isn't Pickit-specific).
+  Never paste the raw Mermaid text as a **visible, uncollapsed** code block *instead of* rendering
+  the image — a site with no Mermaid-rendering marketplace app installed will only show raw Mermaid
+  text as plain/unrendered text or "Error al cargar la extensión," never an actual diagram (confirmed
+  on `pickit.atlassian.net`, 2026-09-03 — don't assume every Confluence site this plugin targets has
+  one installed either, since this plugin isn't Pickit-specific). The collapsed block from point 5 is
+  additive context alongside the rendered PNG, not a substitute for it — always render and attach the
+  PNG per points 1-4 when the token is available.
 
 If a file can't be read this way, skip it and note it as unreadable — don't fail the whole run.
 

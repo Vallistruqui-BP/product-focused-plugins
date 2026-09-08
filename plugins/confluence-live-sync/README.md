@@ -99,8 +99,12 @@ Check on it any time with `Get-ScheduledTask -TaskName "ConfluenceLiveSync_<...>
 - **`.mmd` flowcharts need `$env:CONFLUENCE_API_TOKEN` (an Atlassian API token) and Node/npm on
   PATH** to be rendered to PNG (`mmdc`) and attached via the Confluence REST API — without either,
   the sync falls back to extracting and describing the diagram's labels as text instead of showing
-  the picture. Raw Mermaid code is never pasted onto the page directly, since most Confluence sites
-  have no Mermaid-rendering app installed and it would only show as unrendered text.
+  the picture. Raw Mermaid code is never pasted onto the page as a *visible* code block in place of
+  the image, since most Confluence sites have no Mermaid-rendering app installed and it would only
+  show as unrendered text — but the raw `.mmd` source is always appended right below the rendered
+  image inside a collapsed "Ver código Mermaid" expand block, so the page's Markdown export
+  (`Confluence Sync.md`) carries the actual flow logic, not just an opaque image reference, for any
+  agent that later reads the mirror instead of the rendered page.
 - **Notes-push merge is changelog-style** for any content that doesn't heading-match an existing
   section — expect a growing "Sync updates" section unless your page's headings already line up with
   your local files' own headings.
