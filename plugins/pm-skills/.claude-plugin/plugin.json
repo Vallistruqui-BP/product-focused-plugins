@@ -1,0 +1,10 @@
+{
+  "name": "pm-skills",
+  "description": "A library of ~50 product-management and business skills: discovery, PRD writing, roadmap planning, stakeholder mapping, finance/SaaS metrics, diagramming (mermaid/drawio/plantuml/excalidraw), PDF/PPTX/XLSX generation, prompt engineering, and more. No company-specific configuration required.",
+  "version": "0.1.0",
+  "author": {
+    "name": "pvallarino"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["product-management", "pm", "roadmap", "discovery", "finance", "diagramming"]
+}

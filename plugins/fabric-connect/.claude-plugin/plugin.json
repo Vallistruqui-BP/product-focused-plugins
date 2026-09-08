@@ -1,0 +1,10 @@
+{
+  "name": "fabric-connect",
+  "description": "Connect Claude Code to a Microsoft Fabric SQL analytics endpoint (Lakehouse or Warehouse) without admin rights and without an Entra ID app registration -- device-code login, persistent token cache, and a reusable query runner.",
+  "version": "1.0.0",
+  "author": {
+    "name": "pvallarino"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["microsoft-fabric", "sql", "lakehouse", "warehouse", "azure-ad", "data"]
+}

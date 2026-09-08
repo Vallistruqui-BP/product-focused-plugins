@@ -1,0 +1,9 @@
+desktop.ini
+**/desktop.ini
+**/.fabric_token_cache.bin
+**/results/*.json
+**/results/*.csv
+**/config.local.json
+.env
+**/docs/superpowers/
+**/.superpowers/

@@ -1,0 +1,38 @@
+{
+  "name": "pickit-claude-plugins",
+  "description": "Shareable Claude Code plugins -- reusable setup for common tooling (Fabric SQL connections, Confluence sync, Apps Script development, flowcharting, and a PM/business skills library).",
+  "owner": {
+    "name": "pvallarino"
+  },
+  "plugins": [
+    {
+      "name": "fabric-connect",
+      "source": "./plugins/fabric-connect",
+      "description": "Connect Claude Code to a Microsoft Fabric SQL analytics endpoint (Lakehouse or Warehouse) without admin rights and without an Entra ID app registration -- device-code login, persistent token cache, and a reusable query runner."
+    },
+    {
+      "name": "flowchart-builder",
+      "source": "./plugins/flowchart-builder",
+      "description": "Convert requirements, notes, transcripts, or rough process descriptions into a polished Mermaid (.mmd) flowchart with a synced draw.io (.drawio) copy for free-hand visual editing, curated themes, and auto-validation across both files.",
+      "version": "0.6.0"
+    },
+    {
+      "name": "confluence-live-sync",
+      "source": "./plugins/confluence-live-sync",
+      "description": "Generic, config-driven, bidirectional sync between a project folder and its linked Confluence page -- matches folder name to a Jira issue's summary, no hardcoded project/template. Optional background watch via a Windows scheduled task running headless Claude Code.",
+      "version": "0.5.0"
+    },
+    {
+      "name": "appscript-clasp",
+      "source": "./plugins/appscript-clasp",
+      "description": "Develop Google Apps Script projects locally with Claude using clasp -- create/clone standalone, container-bound (Sheets/Docs/Forms), or web app projects, write and iterate on code, push/pull, run functions, tail logs, and manage deployments.",
+      "version": "0.1.1"
+    },
+    {
+      "name": "pm-skills",
+      "source": "./plugins/pm-skills",
+      "description": "A library of ~50 product-management and business skills: discovery, PRD writing, roadmap planning, stakeholder mapping, finance/SaaS metrics, diagramming, PDF/PPTX/XLSX generation, prompt engineering, and more.",
+      "version": "0.1.0"
+    }
+  ]
+}

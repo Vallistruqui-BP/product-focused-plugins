@@ -1,0 +1,230 @@
+"""Reusable Microsoft Fabric SQL analytics endpoint query runner.
+
+Auth: device-code login against Azure CLI's public, multi-tenant,
+first-party client ID (an existing Microsoft app -- NOT an app registration
+created for this project) via raw MSAL, with a persistent token cache so
+you only log in again roughly every couple of months (whenever the cached
+refresh token expires), not every run. See the connect-fabric skill's
+SKILL.md for the full reasoning and the dead ends that DON'T work.
+
+>>> FILL IN BEFORE FIRST USE <<<
+"""
+import argparse
+import csv
+import json
+import struct
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import mssql_python
+import msal
+
+# Azure CLI's public, multi-tenant first-party client ID.
+# Reused here only to obtain a delegated token via device-code login -
+# no app registration of our own is created or required. This is a stable,
+# well-known Microsoft first-party client ID, not a secret and not
+# something you register yourself.
+AZURE_CLI_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+AUTHORITY = "https://login.microsoftonline.com/organizations"
+SCOPE = ["https://database.windows.net/.default"]
+
+# >>> FILL IN: a LOCAL-ONLY path, outside any cloud-synced folder (OneDrive/
+# Google Drive/Dropbox/etc). This file ends up holding a live refresh token
+# once you log in once -- treat it like a credential, because it is one.
+# Good defaults: next to your venv, or under a dedicated dotfolder in your
+# home directory, e.g. Path.home() / ".fabric" / "<project-name>_token_cache.bin"
+TOKEN_CACHE_PATH = Path.home() / "FILL_IN_TOKEN_CACHE_DIR" / "fabric_token_cache.bin"
+
+# >>> FILL IN: from the Fabric portal, open the item (Lakehouse or
+# Warehouse) -> its "SQL analytics endpoint" (NOT the Lakehouse/Warehouse
+# item itself) -> Settings -> Connection string. It looks like
+# "<workspace>-<item>.datawarehouse.fabric.microsoft.com".
+SERVER = "FILL_IN_YOUR_SERVER.datawarehouse.fabric.microsoft.com"
+# >>> FILL IN: the Lakehouse/Warehouse (database) name shown in that same
+# connection string / in the Fabric portal's item list.
+DATABASE = "FILL_IN_YOUR_DATABASE_NAME"
+
+SQL_COPT_SS_ACCESS_TOKEN = 1256  # the "external token" connection attribute
+
+RESULTS_DIR = Path(__file__).parent / "results"
+
+
+def _load_cache() -> msal.SerializableTokenCache:
+    cache = msal.SerializableTokenCache()
+    if TOKEN_CACHE_PATH.exists():
+        cache.deserialize(TOKEN_CACHE_PATH.read_text(encoding="utf-8"))
+    return cache
+
+
+def _save_cache(cache: msal.SerializableTokenCache):
+    if cache.has_state_changed:
+        TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_CACHE_PATH.write_text(cache.serialize(), encoding="utf-8")
+
+
+class NeedsInteractiveLoginError(RuntimeError):
+    """Raised when interactive=False and there's no usable cached session.
+    Callers running unattended (e.g. a scheduled job) should catch this and
+    skip the run rather than block forever on a device-code flow nobody is
+    present to complete."""
+
+
+def get_access_token(interactive: bool = True) -> str:
+    """Silently reuse a cached refresh token when possible; only fall back
+    to an interactive device-code login when there's no usable cached
+    session (first run, or the refresh token expired/was revoked). Pass
+    interactive=False for unattended callers -- raises
+    NeedsInteractiveLoginError instead of prompting when silent auth fails."""
+    cache = _load_cache()
+    app = msal.PublicClientApplication(
+        AZURE_CLI_CLIENT_ID, authority=AUTHORITY, token_cache=cache
+    )
+
+    result = None
+    accounts = app.get_accounts()
+    if accounts:
+        result = app.acquire_token_silent(SCOPE, account=accounts[0])
+
+    if not result and not interactive:
+        raise NeedsInteractiveLoginError(
+            "No valid cached session and interactive=False -- run a query "
+            "manually once (e.g. `python fabric_query.py \"SELECT 1\"`) to "
+            "sign in again."
+        )
+
+    if not result:
+        flow = app.initiate_device_flow(scopes=SCOPE)
+        if "user_code" not in flow:
+            raise RuntimeError(f"Failed to create device flow: {flow}")
+        print(
+            f"\n=== To sign in, open {flow['verification_uri']} and enter code: {flow['user_code']} ===\n",
+            flush=True,
+        )
+        result = app.acquire_token_by_device_flow(flow)
+
+    _save_cache(cache)
+
+    if not result or "access_token" not in result:
+        raise RuntimeError(f"Failed to acquire token: {(result or {}).get('error_description', result)}")
+
+    return result["access_token"]
+
+
+def token_struct_for(access_token: str) -> bytes:
+    token_bytes = access_token.encode("utf-16-le")
+    return struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+
+
+def run_query(sql: str, name: str = "query", quiet: bool = False):
+    access_token = get_access_token()
+    conn = mssql_python.connect(
+        f"Server={SERVER};Database={DATABASE};Encrypt=yes;",
+        attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct_for(access_token)},
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        columns = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    RESULTS_DIR.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    base = RESULTS_DIR / f"{ts}_{safe_name}"
+
+    records = [dict(zip(columns, [str(v) if v is not None else None for v in row])) for row in rows]
+    with open(f"{base}.json", "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2)
+
+    with open(f"{base}.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if columns:
+            writer.writerow(columns)
+        writer.writerows(rows)
+
+    if not quiet:
+        print(f"\n{len(rows)} row(s), {len(columns)} column(s).")
+        print(f"Saved to:\n  {base}.json\n  {base}.csv\n")
+        for row in rows[:20]:
+            print(row)
+        if len(rows) > 20:
+            print(f"... ({len(rows) - 20} more rows in the saved files)")
+
+    return {"columns": columns, "rows": rows, "json_path": str(base) + ".json", "csv_path": str(base) + ".csv"}
+
+
+def run_many(named_queries, save_files: bool = True, interactive: bool = True):
+    """Run multiple (name, sql) pairs under a single login/connection.
+
+    save_files=False skips writing per-run CSV/JSON dumps under results/ --
+    use this for jobs that run frequently on a schedule, where a fresh pair
+    of files every cycle would just pile up on disk.
+    interactive=False propagates to get_access_token (see there)."""
+    access_token = get_access_token(interactive=interactive)
+    conn = mssql_python.connect(
+        f"Server={SERVER};Database={DATABASE};Encrypt=yes;",
+        attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct_for(access_token)},
+    )
+    results = {}
+    try:
+        if save_files:
+            RESULTS_DIR.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for name, sql in named_queries:
+            cur = conn.cursor()
+            cur.execute(sql)
+            columns = [d[0] for d in cur.description] if cur.description else []
+            rows = cur.fetchall()
+
+            entry = {"columns": columns, "rows": rows}
+
+            if save_files:
+                safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+                base = RESULTS_DIR / f"{ts}_{safe_name}"
+
+                records = [dict(zip(columns, [str(v) if v is not None else None for v in row])) for row in rows]
+                with open(f"{base}.json", "w", encoding="utf-8") as f:
+                    json.dump(records, f, indent=2)
+                with open(f"{base}.csv", "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    if columns:
+                        writer.writerow(columns)
+                    writer.writerows(rows)
+                entry["csv_path"] = str(base) + ".csv"
+                entry["json_path"] = str(base) + ".json"
+
+            print(f"[{name}] {len(rows)} row(s), {len(columns)} column(s)")
+            results[name] = entry
+    finally:
+        conn.close()
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run a read-only T-SQL query against a Fabric SQL analytics endpoint and save results as CSV/JSON."
+    )
+    parser.add_argument("sql", nargs="?", help="SQL query text. If omitted, reads from --file or stdin.")
+    parser.add_argument("--file", help="Path to a .sql file to run instead of inline text.")
+    parser.add_argument("--name", default="query", help="Base name for saved result files.")
+    args = parser.parse_args()
+
+    if args.file:
+        sql = Path(args.file).read_text(encoding="utf-8")
+    elif args.sql:
+        sql = args.sql
+    else:
+        sql = sys.stdin.read()
+
+    run_query(sql, name=args.name)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"FAILED: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)

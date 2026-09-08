@@ -1,0 +1,19 @@
+flowchart TD
+    start([Start])
+    decision{Decision?}
+    thing[Do the thing]
+    other[Do the other thing]
+    finish([End])
+
+    start --> decision
+    decision -->|Yes| thing
+    decision -->|No| other
+    thing --> finish
+    other --> finish
+
+    classDef default fill:#ffffff,stroke:#2563eb,color:#0f172a;
+    classDef decision fill:#fef3c7,stroke:#d97706,color:#78350f;
+
+    class decision decision
+
+    linkStyle 0,1,2,3,4 stroke:#334155,stroke-width:2px;
