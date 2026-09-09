@@ -86,11 +86,19 @@ manifest.
 
 ## webapp / executable API config
 
-`webapp` (access, executeAs) lives in the **deployment**, not the manifest — see
-`deployment-and-webapps.md`. The manifest only needs `"executionApi": {"access": "..."}` if
-exposing the script as an executable API rather than a web app.
-
-Don't add a `"webapp": {...}` block to `appsscript.json` expecting it to configure deployment
-access — it's silently ignored by `clasp push`/`clasp deploy` (confirmed on clasp 3.4.1), even
-though `clasp create` prints a tip implying otherwise. See `deployment-and-webapps.md` for the
-actual (manual, editor-UI-only) way to set access.
+`webapp` (access, executeAs) does affect the deployment, and belongs in the manifest — see
+`deployment-and-webapps.md` for the full picture. Earlier notes here said this block was "silently
+ignored" and that access could only ever be set through the editor UI; that undersold it. In
+practice: the very first deploy of a brand-new deployment ID still needs one manual pass through
+the editor's deploy dialog to become a correctly-typed Web app at all, **but after that, the
+`webapp` block is what keeps `clasp push` + `clasp deploy --deploymentId <id>` updates from silently
+reverting the deployment's type back to Library.** Add it and leave it in `appsscript.json` for any
+web app deployment you intend to update more than once:
+```json
+"webapp": {
+  "executeAs": "USER_DEPLOYING",
+  "access": "DOMAIN"
+}
+```
+The manifest only needs `"executionApi": {"access": "..."}` instead if exposing the script as an
+executable API rather than a web app.

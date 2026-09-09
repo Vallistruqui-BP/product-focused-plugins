@@ -48,17 +48,40 @@ doesn't expose these as CLI flags):
   a Sheet, sends email, calls an external API) as "Anyone" is a real, easy-to-make-by-accident
   security mistake.
 
-**Tested and confirmed NOT to work (clasp 3.4.1, 2026-09):** adding a top-level `"webapp": {"access":
-"DOMAIN", "executeAs": "USER_DEPLOYING"}` block to `appsscript.json` and running `clasp push` +
-`clasp deploy` (even against an existing `--deploymentId`) does **not** apply the access level —
-`clasp create`'s own printed tip ("configure `webApp` in appsscript.json and run
-`clasp create-deployment`") is misleading for this version. The resulting `/exec` URL 404s
-("Página no encontrada" / file-not-found style page, not an access-denied page) for every caller,
-including the owner, until access is set manually. **There is currently no scripted way to set
-Execute-as/Who-has-access — always send the user through the editor's manual deploy dialog**
-(open the project at script.google.com → **Deploy → Manage deployments** → pencil/edit icon on the
+**The manifest `webapp` block matters more than earlier notes here claimed.** A prior version of
+this doc said adding a top-level `"webapp": {"access": "DOMAIN", "executeAs": "USER_DEPLOYING"}`
+block to `appsscript.json` was "confirmed NOT to work" and that manually setting access once via
+the editor was enough to stick across future deploys. **Both of those claims turned out to be
+wrong in practice (clasp 3.4.1, reproduced 2026-09):** without that manifest block present,
+`clasp deploy --deploymentId <id>` can silently **revert the deployment's type from "Web app" back
+to "Library"** on a later deploy — even after the type/access was set correctly once through the
+editor UI. The symptom is the `/exec` URL 404ing (or redirecting oddly) again after a routine code
+update that used to work, with no error from `clasp` itself. Opening **Deploy → Manage
+deployments → pencil icon → gear icon next to "Select type"** shows the type has flipped back to
+**Library**.
+
+**Fix — add the manifest block and keep it there permanently:**
+```json
+"webapp": {
+  "executeAs": "USER_DEPLOYING",
+  "access": "DOMAIN"
+}
+```
+(`executeAs` also accepts `"USER_ACCESSING"`; `access` also accepts `"MYSELF"` or `"ANYONE"` per the
+same rules as the editor's "Who has access" dropdown.) Push and redeploy once with this block
+present — after that, this doc's original guidance about a one-time manual editor pass still holds
+true: `clasp push` + `clasp deploy --deploymentId <id>` cycles keep serving at the same URL with the
+same type and access, indefinitely, without reverting. **Treat the manifest block as mandatory for
+any web app deployment that gets updated more than once**, not as an optional nicety — the original
+manual-UI-only workflow this doc described is what silently breaks without it.
+
+You still can't set Execute-as/Who-has-access purely from a fresh `clasp create` + `clasp deploy`
+with no prior manual step — the very first deploy of a brand-new deployment ID still needs one pass
+through the editor's manual deploy dialog (**Deploy → Manage deployments** → pencil/edit icon on the
 existing deployment (or **New deployment**) → gear icon next to "Select type" → choose **Web app**
-→ set **Execute as** and **Who has access** → **Deploy**).
+→ set **Execute as** and **Who has access** → **Deploy**) to mint a working, correctly-typed
+deployment in the first place. The manifest block is what keeps it that way afterward — it doesn't
+replace that first manual pass.
 
 **Domain-restricted URLs look different.** A deployment manually configured for "Anyone within
 [organization]" gets a domain-scoped URL shaped
@@ -76,14 +99,15 @@ the real one going forward — that's the one with working access settings and t
 get — and use `clasp deploy --deploymentId <that-id>` for later code updates so they land on the
 same URL instead of creating yet another deployment.
 
-**Confirmed: the access level sticks across later updates.** Once a deployment ID has had its
-access level set manually (once), subsequent `clasp push` + `clasp deploy --deploymentId <id>`
-cycles update the code and keep serving at the exact same URL with the exact same access level —
-no repeat trip through the editor UI. Verified end-to-end: pushed new data, ran
-`clasp deploy --deploymentId <manually-configured-id> --description "..."`, and the existing
-domain-restricted URL immediately served the updated content. This is what makes a scheduled/
-unattended refresh workflow viable — the manual UI step is genuinely one-time per deployment, not
-per update.
+**The access level sticks across later updates — but only with the manifest `webapp` block from the
+section above present in `appsscript.json`.** With that block in place, once a deployment ID has
+had its access level set manually (once), subsequent `clasp push` + `clasp deploy --deploymentId
+<id>` cycles update the code and keep serving at the exact same URL with the exact same type and
+access level — no repeat trip through the editor UI. This is what makes a scheduled/unattended
+refresh workflow viable — the manual UI step is genuinely one-time per deployment, not per update.
+**Without the manifest block, this does not hold** — a later `clasp deploy --deploymentId <id>` can
+revert the deployment type to Library and break the URL, as described above. Always add the
+manifest block before setting up any recurring/scheduled deploy cycle against a web app deployment.
 
 ## Executable APIs
 
