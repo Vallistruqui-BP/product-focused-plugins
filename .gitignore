@@ -7,3 +7,4 @@ desktop.ini
 .env
 **/docs/superpowers/
 **/.superpowers/
+**/__pycache__/
