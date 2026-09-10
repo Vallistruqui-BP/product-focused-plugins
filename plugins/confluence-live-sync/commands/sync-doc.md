@@ -195,13 +195,41 @@ notes-push direction, and continue on to step 6.
   a real image and attach it to the page** — a script-based render + REST-API upload, no browser
   automation:
 
-  1. **Render to PNG** via the `@mermaid-js/mermaid-cli` npm package (command `mmdc`; bundles its own
-     headless Chromium via Puppeteer — no desktop app, no admin rights). Check with `mmdc -V`; if
-     missing, `npm install --global @mermaid-js/mermaid-cli` (needs Node/npm on PATH — check for a
-     portable Node install already present on the machine before assuming Node needs installing):
-     ```
-     mmdc -i "<dir>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent
-     ```
+  1. **Render to PNG at an adaptive resolution** via the `@mermaid-js/mermaid-cli` npm package
+     (command `mmdc`; bundles its own headless Chromium via Puppeteer — no desktop app, no admin
+     rights). Check with `mmdc -V`; if missing, `npm install --global @mermaid-js/mermaid-cli`
+     (needs Node/npm on PATH — check for a portable Node install already present on the machine
+     before assuming Node needs installing). **Never render with a single fixed `-s` value for
+     every diagram** — a flat scale factor either blurs large/dense diagrams when the viewer zooms
+     in, or wastefully bloats tiny diagrams that never needed the extra pixels. Instead, size the
+     scale to the diagram itself, in two passes:
+
+     a. **Probe pass** — render once at the `mmdc` default scale (no `-s` flag) to a scratch path,
+        to measure the diagram's own natural size:
+        ```
+        mmdc -i "<dir>/<basename>.mmd" -o "<scratchpad>/<basename>-probe.png" -b transparent
+        ```
+        Read the PNG's own `IHDR` chunk for its pixel width/height (bytes 16-24 of the file: two
+        big-endian uint32s) — no image library needed, e.g. via a one-line Python `struct.unpack`
+        or PowerShell `[System.Drawing.Image]`. Take `longEdge = max(width, height)` as the
+        complexity signal (Mermaid flowcharts grow almost entirely in one axis — usually height for
+        `flowchart TD` — so the long edge tracks "how much diagram there is" far better than either
+        dimension alone, and far better than counting nodes in the `.mmd` source, which doesn't
+        account for label length or subgraph nesting).
+     b. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 900), 4, 7)`. Calibrated
+        against 5 real diagrams on a real page, in two rounds: the first round (divisor 1300, floor
+        3, ceiling 6) landed a 3988px-tall diagram at scale 4 and four 1700-2400px diagrams at scale
+        3 — legible, but the user asked for still more definition after seeing it live, so the
+        divisor was tightened and the floor raised, moving the same diagrams to scale 5 and scale 4
+        respectively. The floor keeps even small diagrams comfortably supersampled (a flat `-s 1`
+        was confirmed too blurry to read on zoom), and the ceiling keeps an unusually large
+        diagram's file size sane (a diagram many times larger than any seen so far would otherwise
+        scale its file size unboundedly). Adjust the divisor/floor/ceiling only if a real diagram's
+        rendered legibility says otherwise — don't tune this from first principles alone.
+     c. **Final pass** — render for real at the computed scale, discard the probe file:
+        ```
+        mmdc -i "<dir>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent -s <scale>
+        ```
      One `.mmd` file is one diagram — no multi-page splitting concern.
   2. **Upload the PNG as a page attachment via the Confluence REST API** (v1 — the v2 API has no
      write endpoint for attachments), authenticated with an Atlassian API token retrieved via
@@ -265,12 +293,27 @@ notes-push direction, and continue on to step 6.
      node syntax, with the `fileId`/`collection` from step 3 — insert this at the point in the
      merged HTML where the diagram belongs, not as a separate edit:
      ```html
-     <figure data-type="media-single" data-layout="center" data-width="80">
+     <figure data-type="media-single" data-layout="center" data-width="100" data-width-type="percentage">
        <div data-type="media" data-media-type="file" data-id="<fileId>" data-collection="<collection>" data-alt="<basename>.png"></div>
      </figure>
      ```
      Confirmed working end-to-end this way on a real page — this is the only syntax in this HTML
-     format that renders a real inline image from a REST-API-uploaded attachment.
+     format that renders a real inline image from a REST-API-uploaded attachment. `data-width="100"`
+     with `data-layout="center"` makes the diagram span the full paragraph width and stay centered,
+     matching the rest of the page's formatting — confirmed as the preferred default on a real page
+     after the user asked for wider diagrams twice (first from 80px effective to 80%, then from 80%
+     to 100%).
+     **`data-width-type="percentage"` is not optional — always include it explicitly.** Omitting it
+     is not equivalent to defaulting to percentage: Confluence's HTML→ADF converter silently stores
+     the bare `data-width` value as **literal pixels** (`widthType: "pixel"`) when no width-type is
+     given, so `data-width="80"` with no `data-width-type` round-trips as an 80-pixel-wide image —
+     confirmed by reading the page's raw ADF via `GET /wiki/api/v2/pages/{id}?body-format=atlas_doc_format`
+     (`mediaSingle.attrs` showed `{"width": 80, "widthType": "pixel"}`), not just the HTML the MCP
+     tool hands back. This produced a near-invisible diagram on a real page and needed two follow-up
+     syncs to diagnose and fix — always set `data-width-type="percentage"` on every `<figure
+     data-type="media-single">` you write, never rely on an implicit default. When you need to
+     verify a diagram's actual rendered width (not trust the HTML-format read-back, which can mask
+     this), fetch `atlas_doc_format` directly and check `mediaSingle.attrs.widthType`.
   5. **Immediately after that `<figure>`, append a collapsed Mermaid-source block** — an `expand`
      (`<details>`) containing the diagram's raw `.mmd` text as-is, verbatim, in a code block:
      ```html

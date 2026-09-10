@@ -13,20 +13,20 @@
     {
       "name": "flowchart-builder",
       "source": "./plugins/flowchart-builder",
-      "description": "Convert requirements, notes, transcripts, or rough process descriptions into a polished Mermaid (.mmd) flowchart with a synced draw.io (.drawio) copy for free-hand visual editing, curated themes, and auto-validation across both files.",
-      "version": "0.6.0"
+      "description": "Convert requirements, notes, transcripts, or rough process descriptions into a polished Mermaid (.mmd) flowchart, with curated themes and auto-validation.",
+      "version": "0.7.0"
     },
     {
       "name": "confluence-live-sync",
       "source": "./plugins/confluence-live-sync",
       "description": "Generic, config-driven, bidirectional sync between a project folder and its linked Confluence page -- matches folder name to a Jira issue's summary, no hardcoded project/template. Optional background watch via a Windows scheduled task running headless Claude Code.",
-      "version": "0.5.0"
+      "version": "0.9.0"
     },
     {
       "name": "appscript-clasp",
       "source": "./plugins/appscript-clasp",
       "description": "Develop Google Apps Script projects locally with Claude using clasp -- create/clone standalone, container-bound (Sheets/Docs/Forms), or web app projects, write and iterate on code, push/pull, run functions, tail logs, and manage deployments.",
-      "version": "0.1.1"
+      "version": "0.1.2"
     },
     {
       "name": "pm-skills",
