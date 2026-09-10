@@ -1,0 +1,197 @@
+"""Reusable Botmaker API v2.0 client.
+
+Auth: a static access token pasted from the Botmaker dashboard
+(Configuration > Integrations > API > Credentials tab), sent via the
+custom `access-token` HTTP header -- not `Authorization`. There is no
+confirmed automatic refresh flow; see the connect-botmaker skill's
+SKILL.md for why. On 401/403 the caller must regenerate the token in the
+dashboard and re-run credential setup (`--setup`).
+
+The retry/backoff policy, pagination scheme, and the four wrapped GET
+endpoints below all come from a real, already-working Botmaker
+integration (see SKILL.md "Where this came from") -- not from guessing at
+Botmaker's swagger.
+
+>>> FILL IN BEFORE FIRST USE <<<
+"""
+import json
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+BASE_URL = "https://api.botmaker.com/v2.0"
+
+# >>> FILL IN: a LOCAL-ONLY path, outside any cloud-synced folder (OneDrive/
+# Google Drive/Dropbox/etc). Holds a live API credential once you run
+# `--setup` -- treat it like a secret. Good default: a dedicated dotfolder
+# in your home directory, namespaced by workspace so multiple Botmaker
+# accounts on the same machine don't collide.
+CREDENTIALS_PATH = Path.home() / ".botmaker" / "FILL_IN_WORKSPACE_credentials.json"
+
+MAX_RETRIES = 5
+RETRY_BASE_DELAY_S = 1.0
+MAX_PAGES = 500
+
+
+class BotmakerAuthError(RuntimeError):
+    """Raised on HTTP 401/403 -- the access token is missing, invalid, or
+    expired. There is no confirmed automatic refresh: regenerate the token
+    at Configuration > Integrations > API in the Botmaker dashboard and
+    re-run `python botmaker_client.py --setup`."""
+
+
+class BotmakerAPIError(RuntimeError):
+    """Raised for any other non-retryable HTTP error (or after exhausting
+    retries on 429/5xx), with the response body (truncated) included so
+    the caller can see what Botmaker actually said."""
+
+
+def _load_credentials() -> dict:
+    if not CREDENTIALS_PATH.exists():
+        raise RuntimeError(
+            f"No credentials file at {CREDENTIALS_PATH}. Run "
+            "`python botmaker_client.py --setup` first."
+        )
+    return json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+
+
+def save_credentials(access_token: str, secret_id: str = "", refresh_token: str = "") -> None:
+    """Writes the three dashboard values to CREDENTIALS_PATH. All three are
+    saved even though only access_token is used today, so nobody has to
+    paste them twice if a refresh mechanism is confirmed later."""
+    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CREDENTIALS_PATH.write_text(
+        json.dumps(
+            {
+                "access_token": access_token,
+                "secret_id": secret_id,
+                "refresh_token": refresh_token,
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    try:
+        CREDENTIALS_PATH.chmod(0o600)
+    except (NotImplementedError, OSError):
+        pass  # best-effort; not every platform supports POSIX permission bits
+
+
+def call(method: str, path: str, params: dict = None, json_body: dict = None) -> dict:
+    """Calls one Botmaker API v2.0 endpoint (path like "/channels", not a
+    full URL). Retries with exponential backoff on 429/5xx (up to
+    MAX_RETRIES); a 401/403 raises BotmakerAuthError immediately without
+    retrying -- matches the real integration this is based on, which never
+    retries auth failures."""
+    token = _load_credentials()["access_token"]
+    url = BASE_URL + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+
+    data = json.dumps(json_body).encode("utf-8") if json_body is not None else None
+    headers = {"accept": "application/json", "access-token": token}
+    if data is not None:
+        headers["content-type"] = "application/json"
+
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+        try:
+            with urllib.request.urlopen(request) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:1500]
+            if e.code in (401, 403):
+                raise BotmakerAuthError(
+                    f"Botmaker HTTP {e.code} -- token missing/invalid/expired. "
+                    "Regenerate it at Configuration > Integrations > API in the "
+                    f"Botmaker dashboard and re-run `--setup`. Body: {body}"
+                ) from None
+            if e.code == 429 or e.code >= 500:
+                last_error = BotmakerAPIError(f"Botmaker HTTP {e.code}: {body}")
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BASE_DELAY_S * (2 ** attempt))
+                continue
+            raise BotmakerAPIError(f"Botmaker HTTP {e.code}: {body}") from None
+
+    raise last_error
+
+
+def paginate(path: str, params: dict = None):
+    """Yields items across all pages of a paginated GET endpoint by
+    following the response's `nextPage` field (a full next-page URL).
+    Stops after MAX_PAGES as a runaway guard."""
+    next_url = BASE_URL + path
+    if params:
+        next_url += "?" + urllib.parse.urlencode(params)
+
+    pages = 0
+    while next_url:
+        if pages >= MAX_PAGES:
+            raise BotmakerAPIError(f"Hit MAX_PAGES ({MAX_PAGES}) while paginating {path}. Narrow the query.")
+        payload = call("GET", next_url[len(BASE_URL):])
+        for item in payload.get("items", []):
+            yield item
+        next_page = payload.get("nextPage")
+        next_url = str(next_page) if next_page else None
+        pages += 1
+        if next_url:
+            time.sleep(0.25)  # matches the real integration's between-page pacing
+
+
+# -- Known-good endpoints, verified against a real, already-working
+# Botmaker integration (see SKILL.md "Where this came from"). For anything
+# else, check the swagger at go.botmaker.com/apidocs/ (requires login)
+# before guessing a payload shape.
+
+def get_whatsapp_templates(state: str = "APPROVED") -> list:
+    return call("GET", "/whatsapp/templates", params={"state": state}).get("items", [])
+
+
+def get_channels(platform: str = "whatsapp", active: bool = True) -> list:
+    params = {"platform": platform, "active": str(active).lower()}
+    return call("GET", "/channels", params=params).get("items", [])
+
+
+def get_messages(**params) -> list:
+    """params: any filter the /messages endpoint accepts (e.g. from-date,
+    to-date, long-term-search). Returns all items across every page."""
+    return list(paginate("/messages", params=params))
+
+
+def get_sessions(**params) -> list:
+    """params: any filter the /sessions endpoint accepts. Always adds
+    timestamp-precision=milliseconds, matching the real integration."""
+    params.setdefault("timestamp-precision", "milliseconds")
+    return list(paginate("/sessions", params=params))
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Set up or smoke-test the Botmaker API v2.0 connection.")
+    parser.add_argument("--setup", action="store_true", help="Interactively paste and save credentials.")
+    args = parser.parse_args()
+
+    if args.setup:
+        access_token = input("Access token: ").strip()
+        secret_id = input("Secret ID (optional, Enter to skip): ").strip()
+        refresh_token = input("Refresh token (optional, Enter to skip): ").strip()
+        save_credentials(access_token, secret_id, refresh_token)
+        print(f"Saved to {CREDENTIALS_PATH}")
+        return
+
+    channels = get_channels()
+    print(f"OK -- {len(channels)} active WhatsApp channel(s) found.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"FAILED: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
