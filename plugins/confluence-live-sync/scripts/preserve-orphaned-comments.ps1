@@ -25,6 +25,17 @@
   elsewhere in the plugin skills — this script uses the same resilient lookup).
   Uses Confluence REST API v2 for inline comments and REST API v1 for footer
   comments (v1 footer-comment endpoint is stable and simple to POST to).
+
+  KNOWN GOTCHA — do not "simplify" orphan-detection back to resolutionStatus
+  or comment-ID presence: confirmed on page 3233677317 (2026-09-14) that a
+  full-body markdown push strips inline-comment anchor marks from the ENTIRE
+  page body (not just edited paragraphs — markdown has no way to represent an
+  anchor mark at all), yet the comment OBJECT itself is untouched: its ID
+  keeps existing and the API keeps reporting resolutionStatus "open", never
+  "dangling", even though the highlight is gone from the live page. So orphan
+  detection MUST diff the snapshot's anchored text against the CURRENT page
+  content (substring containment), not against comment IDs or resolutionStatus
+  — both of those looked fine while 10 comments were silently invisible.
 #>
 
 param(
@@ -98,11 +109,33 @@ if ($Mode -eq "Reconcile") {
   $after = Get-InlineComments -PageId $PageId
   $afterIds = $after | ForEach-Object { $_.id }
 
+  $reconciledLogPath = Join-Path (Split-Path $SnapshotPath -Parent) "inline-comments-reconciled-log.json"
+  $reconciledIds = @()
+  if (Test-Path $reconciledLogPath) {
+    $reconciledIds = @(Get-Content $reconciledLogPath -Raw | ConvertFrom-Json)
+  }
+
+  # Fetch current page content as plain text so we can check whether each
+  # snapshotted comment's anchored text still actually appears on the page.
+  # This is the real signal — comment IDs and resolutionStatus both survive
+  # a markdown-push anchor-strip untouched, so neither can be trusted alone.
+  $pageUri = "$SiteBaseUrl/api/v2/pages/$PageId?body-format=storage"
+  $pageResp = Invoke-RestMethod -Uri $pageUri -Headers $headers -Method Get
+  $pageText = $pageResp.body.storage.value -replace '<[^>]+>', ' ' -replace '\s+', ' '
+
   $orphaned = $before | Where-Object {
-    # A comment is orphaned if it no longer exists post-publish (the node it
-    # was anchored to got deleted/recreated during the full-body replace) OR
-    # its status flipped to a "dangling"/unresolved-anchor state.
-    ($_.id -notin $afterIds)
+    $c = $_
+    if ($c.id -in $reconciledIds) { return $false }  # already reconciled on a prior run
+    $idGone = ($c.id -notin $afterIds)
+    $anchorGone = $false
+    if ($c.originalSelection) {
+      # Compare a stable prefix (selections are often ellipsized) — 60 chars
+      # is short enough to survive minor rewording but long enough to avoid
+      # false negatives from generic short phrases.
+      $probe = $c.originalSelection.Substring(0, [Math]::Min(60, $c.originalSelection.Length)).Trim()
+      if ($probe -and ($pageText -notlike "*$probe*")) { $anchorGone = $true }
+    }
+    ($idGone -or $anchorGone)
   }
 
   if (-not $orphaned -or $orphaned.Count -eq 0) {
@@ -128,8 +161,10 @@ if ($Mode -eq "Reconcile") {
 
     Invoke-RestMethod -Uri $footerUri -Method Post -Headers ($headers + @{ "Content-Type" = "application/json" }) -Body $footerPayload | Out-Null
     Write-Output "Re-posted orphaned comment $($c.id) as a footer comment."
+    $reconciledIds += $c.id
   }
 
+  $reconciledIds | ConvertTo-Json -Depth 5 | Set-Content -Path $reconciledLogPath -Encoding utf8
   Write-Output "Reconciled $($orphaned.Count) orphaned inline comment(s) into footer comments."
   exit 0
 }

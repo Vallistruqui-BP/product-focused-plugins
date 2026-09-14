@@ -20,7 +20,7 @@
       "name": "confluence-live-sync",
       "source": "./plugins/confluence-live-sync",
       "description": "Generic, config-driven, bidirectional sync between a project folder and its linked Confluence page -- matches folder name to a Jira issue's summary, no hardcoded project/template. Optional background watch via a Windows scheduled task running headless Claude Code.",
-      "version": "0.10.0"
+      "version": "0.11.0"
     },
     {
       "name": "appscript-clasp",

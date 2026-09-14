@@ -70,6 +70,29 @@ Edits made to it locally get pushed back; edits made on the page get pulled down
 changed since the last sync, this does a real three-way merge and only ever asks a human to resolve
 an actual overlapping conflict — it never silently picks a winner.
 
+**Known limitation — why every markdown push snapshots comments automatically**: a full-body
+`updateConfluencePage` call with `contentFormat: "markdown"` strips Confluence's inline-comment
+anchor marks from the **entire** page body, not just the paragraphs actually being edited — markdown
+has no representation for an anchor mark at all, so the whole body effectively gets rebuilt without
+them. The comment *object* survives untouched (same ID, `resolutionStatus` still reports `"open"`,
+never flips to `"dangling"`) — only the highlight/anchor in the live content is gone, silently.
+Confirmed on a real page (3233677317, 2026-09-14): 10 inline comments across several rounds of
+markdown pushes went invisible with no error, no status change, and nobody noticed until a human
+asked about them directly. `contentFormat: "html"` pushes (step 5 below) are round-trip safe and do
+**not** have this problem — only the markdown-format push in this step does. That's why steps 3.1 and
+3.2 below are mandatory, not optional, and don't ask for confirmation — they're a cheap safety net
+around a push mode this plugin already always uses.
+
+### 3.1. Snapshot inline comments (before any push below)
+
+Run, once, before evaluating any of the four cases below:
+```powershell
+pwsh -File "<this plugin's own installed dir>/scripts/preserve-orphaned-comments.ps1" -Mode Snapshot -PageId $pageId
+```
+Resolve the script path relative to this plugin's own installed location, never hardcoded. If the
+script errors (e.g. missing API token), don't fail the whole run — note in the final report that
+comment-preservation was skipped this run, and continue with the mirror sync itself.
+
 1. Fetch the page via `getConfluencePage` (`contentFormat: "markdown"`). Call its body
    `$remoteMarkdown` and its `version.number` `$remoteVersion`.
 2. Read the current contents of `Confluence Sync.md` (empty string if it doesn't exist yet) as
@@ -148,6 +171,18 @@ And handle whichever case applies:
 **Defense in depth**: regardless of which branch above ran, never call `updateConfluencePage` with a
 body that contains a `<<<<<<<`/`|||||||`/`=======`/`>>>>>>>` marker line — treat that as an unresolved conflict
 and refuse the push, in case the file and the state/baseline ever fall out of step with each other.
+
+### 3.2. Reconcile any orphaned inline comments (after the mirror sync above)
+
+Run once, regardless of which of the four cases above fired (including "neither changed" — cheap and
+harmless if nothing was orphaned):
+```powershell
+pwsh -File "<this plugin's own installed dir>/scripts/preserve-orphaned-comments.ps1" -Mode Reconcile -PageId $pageId
+```
+Capture its stdout — it reports how many comments it checked and how many (if any) it found orphaned
+and reposted as footer comments. Include that count in the final report (step 8) so this is visible,
+not silent. If step 3.1's snapshot was skipped (missing token, etc.), this will have nothing to
+reconcile against — skip it too and note the same in the report.
 
 ## 4. Notes push: find new local files
 
@@ -417,6 +452,9 @@ Print a concise summary covering both directions:
   written to `Confluence Sync.md` and unresolved** / Git unavailable, wrote
   `Confluence Sync (remote).md` instead — be explicit about which one happened, this is the part most
   likely to need the user's attention.
+- Comment preservation (steps 3.1/3.2): how many inline comments were snapshotted, and how many (if
+  any) were found orphaned by the markdown push and reconciled as footer comments — or that this step
+  was skipped and why (e.g. missing API token).
 - Notes push (steps 4-5): files merged (noting which were integrated into an existing section vs
   appended under "Sync updates," and for `.mmd` files whether the diagram was rendered and
   attached as a PNG or only had its labels extracted as a fallback — and if only labels, why: the
