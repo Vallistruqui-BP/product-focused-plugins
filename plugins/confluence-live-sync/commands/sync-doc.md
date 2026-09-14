@@ -239,10 +239,27 @@ notes-push direction, and continue on to step 6.
      in, or wastefully bloats tiny diagrams that never needed the extra pixels. Instead, size the
      scale to the diagram itself, in two passes:
 
-     a. **Probe pass** — render once at the `mmdc` default scale (no `-s` flag) to a scratch path,
+     a. **Prepend a font-size init directive to a scratch copy of the `.mmd` before rendering —
+        never render the checked-in file directly.** This is the primary legibility lever, and it is
+        NOT the same thing as the `-s` scale factor in step (b) below — see the explainer after this
+        list for why both exist and what each one actually fixes.
+        ```
+        %%{init: {'themeVariables': {'fontSize': '18px'}}}%%
+        <...rest of the .mmd file, unchanged...>
+        ```
+        Write this to `<scratchpad>/<basename>.mmd` (prepend the directive, then the original file's
+        full contents) and render THAT file in both the probe and final passes below — never the
+        original `<dir>/<basename>.mmd`, and never edit the checked-in source file itself to add
+        this line (keep the source diagrams clean/portable; the directive is a render-time-only
+        concern). `18px` was confirmed on a real diagram (`flujo-chequeo-proactivo-marcado-accidental.mmd`)
+        to grow node/box text noticeably without any width change (still 784px wide) — height grew
+        1570px → 1678px, i.e. boxes got taller/text wrapped more to fit the bigger font in the same
+        column width, which is exactly the effect wanted. Adjust the value only if a real diagram's
+        rendered legibility says otherwise.
+     b. **Probe pass** — render once at the `mmdc` default scale (no `-s` flag) to a scratch path,
         to measure the diagram's own natural size:
         ```
-        mmdc -i "<dir>/<basename>.mmd" -o "<scratchpad>/<basename>-probe.png" -b transparent
+        mmdc -i "<scratchpad>/<basename>.mmd" -o "<scratchpad>/<basename>-probe.png" -b transparent
         ```
         Read the PNG's own `IHDR` chunk for its pixel width/height (bytes 16-24 of the file: two
         big-endian uint32s) — no image library needed, e.g. via a one-line Python `struct.unpack`
@@ -251,7 +268,7 @@ notes-push direction, and continue on to step 6.
         `flowchart TD` — so the long edge tracks "how much diagram there is" far better than either
         dimension alone, and far better than counting nodes in the `.mmd` source, which doesn't
         account for label length or subgraph nesting).
-     b. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 900), 4, 7)`. Calibrated
+     c. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 900), 4, 7)`. Calibrated
         against 5 real diagrams on a real page, in two rounds: the first round (divisor 1300, floor
         3, ceiling 6) landed a 3988px-tall diagram at scale 4 and four 1700-2400px diagrams at scale
         3 — legible, but the user asked for still more definition after seeing it live, so the
@@ -260,12 +277,42 @@ notes-push direction, and continue on to step 6.
         was confirmed too blurry to read on zoom), and the ceiling keeps an unusually large
         diagram's file size sane (a diagram many times larger than any seen so far would otherwise
         scale its file size unboundedly). Adjust the divisor/floor/ceiling only if a real diagram's
-        rendered legibility says otherwise — don't tune this from first principles alone.
-     c. **Final pass** — render for real at the computed scale, discard the probe file:
+        rendered legibility says otherwise — don't tune this from first principles alone. **This
+        ceiling is deliberately NOT raised further as a legibility fix** — see the explainer below
+        for why scale doesn't move the needle on legibility the way font-size does; one real diagram
+        on this project already reaches ~5488×41391px at scale 7, and pushing scale higher on
+        diagrams already that large mainly bloats file size for no visible gain at the fixed display
+        width.
+     d. **Final pass** — render for real at the computed scale, discard the probe file:
         ```
-        mmdc -i "<dir>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent -s <scale>
+        mmdc -i "<scratchpad>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent -s <scale>
         ```
      One `.mmd` file is one diagram — no multi-page splitting concern.
+
+     **Why font-size (step a) and scale (step c) are different levers, and why scale alone never
+     fixed the "cajas ilegibles" complaint in earlier rounds:** the page's content column has a
+     fixed, genuine width (confirmed via a raw ADF probe on a real page: `layout: "wide"` normalizes
+     to the exact same `680px`/`pixel` as `layout: "center"` — only `layout: "full-width"` breaks out
+     wider, to `960px`, which overshoots the paragraph column and was rejected for that reason). The
+     `-s` scale factor uniformly multiplies EVERY pixel in the raster — the diagram's overall pixel
+     dimensions grow, but the ratio of "how much of the image's own width a box's text occupies"
+     never changes, so when the browser downscales that raster back down to fit the fixed 680px
+     column, the text renders at essentially the same *visual* size regardless of how high `-s` was
+     pushed (scale only buys crispness/DPI for zooming or retina displays, not bigger-looking text in
+     the normal inline view). The only way to make box text visually bigger at a *fixed* display
+     width is to make Mermaid itself draw bigger text relative to the diagram's own layout — which is
+     exactly what the `fontSize` theme variable in step (a) does (confirmed empirically: width stays
+     flat, height grows, meaning text now claims more of that same fixed width). **Do not try to fix
+     legibility by raising the scale ceiling — it does not work; raise the font-size instead.**
+
+     **On cropping/merging a very tall diagram into bands (considered and rejected):** this doesn't
+     help legibility either, for the same underlying reason — a cropped vertical band still renders
+     at the same fixed column width as the uncropped image, so per-box text stays the same visual
+     size; cropping only helps if a single image were hitting a genuine file-size/dimension ceiling
+     (not something observed on this project's diagrams so far — see the size example in step (c)),
+     and it adds real complexity (N attachments per diagram, N figure blocks, harder to keep in sync
+     when the source `.mmd` changes). Not implemented; revisit only if a diagram is ever large enough
+     to actually fail to upload or render.
   2. **Upload the PNG as a page attachment via the Confluence REST API** (v1 — the v2 API has no
      write endpoint for attachments), authenticated with an Atlassian API token retrieved via
      `Get-ConfluenceApiToken` (defined below) — never a bare `$env:CONFLUENCE_API_TOKEN` check, and
@@ -337,18 +384,25 @@ notes-push direction, and continue on to step 6.
      with `data-layout="center"` makes the diagram span the full paragraph width and stay centered,
      matching the rest of the page's formatting — confirmed as the preferred default on a real page
      after the user asked for wider diagrams twice (first from 80px effective to 80%, then from 80%
-     to 100%).
-     **`data-width-type="percentage"` is not optional — always include it explicitly.** Omitting it
-     is not equivalent to defaulting to percentage: Confluence's HTML→ADF converter silently stores
-     the bare `data-width` value as **literal pixels** (`widthType: "pixel"`) when no width-type is
-     given, so `data-width="80"` with no `data-width-type` round-trips as an 80-pixel-wide image —
-     confirmed by reading the page's raw ADF via `GET /wiki/api/v2/pages/{id}?body-format=atlas_doc_format`
-     (`mediaSingle.attrs` showed `{"width": 80, "widthType": "pixel"}`), not just the HTML the MCP
-     tool hands back. This produced a near-invisible diagram on a real page and needed two follow-up
-     syncs to diagnose and fix — always set `data-width-type="percentage"` on every `<figure
-     data-type="media-single">` you write, never rely on an implicit default. When you need to
-     verify a diagram's actual rendered width (not trust the HTML-format read-back, which can mask
-     this), fetch `atlas_doc_format` directly and check `mediaSingle.attrs.widthType`.
+     to 100%). **Never omit `data-width` entirely** — confirmed on a real page that omitting it makes
+     Confluence fall back to the image's own native pixel width (e.g. `5488px`) as a literal pixel
+     width, which badly overflows the content column; always send an explicit `data-width="100"`.
+     **Correction to earlier guidance in this file (previously claimed `data-width-type="percentage"`
+     was mandatory and its absence caused a near-invisible diagram) — re-investigated on a real page
+     via three direct ADF probes and found to be a misdiagnosis:** `data-width-type` is not
+     authoritative. Confluence silently normalizes `mediaSingle.attrs.widthType` to `"pixel"` on
+     write regardless of what width-type value the HTML/ADF send specifies (confirmed: an explicit
+     `widthType: "percentage"` sent via a raw ADF write round-tripped back as `{"width": 680,
+     "widthType": "pixel"}` — `680px` being this page's actual, correct, full-column-width value, not
+     a bug). The real variable that matters is the **numeric `data-width` value itself** — small
+     values like `80` (a leftover from an even earlier default, not `80%`) really did render a
+     near-invisible diagram, but that was because `80` was being stored as `80px` literal, not
+     because of a missing width-type flag; sending `data-width="100"` (the current default per this
+     step) resolves to the correct full-column width either way. **You do not need to set
+     `data-width-type` at all going forward** — `data-width="100"` alone is sufficient and is what
+     the official Confluence HTML-format guide's own canonical media example uses (no width-type).
+     Setting `data-width-type="percentage"` explicitly is harmless (it's simply overridden/ignored on
+     write) but no longer treated as load-bearing in this file.
   5. **Immediately after that `<figure>`, append a collapsed Mermaid-source block** — an `expand`
      (`<details>`) containing the diagram's raw `.mmd` text as-is, verbatim, in a code block:
      ```html
