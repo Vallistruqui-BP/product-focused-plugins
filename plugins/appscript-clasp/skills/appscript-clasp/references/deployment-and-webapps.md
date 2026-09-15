@@ -83,6 +83,21 @@ existing deployment (or **New deployment**) → gear icon next to "Select type" 
 deployment in the first place. The manifest block is what keeps it that way afterward — it doesn't
 replace that first manual pass.
 
+**Exception observed (clasp 3.4.1, 2026-09):** on a container-bound Sheets script where the
+`webapp` manifest block was already pushed *before* the very first `clasp deploy`, that first
+deployment still came out broken — `/exec` (both the generic and `/a/macros/<domain>/` shapes)
+returned Google Drive's generic "no se puede abrir el archivo" file-not-found page instead of
+executing `doGet`, even though `curl -w '%{http_code}'` against it returned a plain `200`. No
+manual editor pass was needed to fix it: running `clasp undeploy <id>` on the broken deployment and
+then a fresh `clasp deploy -d "..."` (same manifest, no other change) produced a *second*
+deployment ID whose `/exec` URL worked correctly first try, confirmed by the user opening it in a
+real browser. Whatever went wrong seems tied to the very first deployment attempt for a given
+script project specifically (a one-time provisioning/consent step on Google's side that can fail
+silently on attempt 1), not to the manifest block or deploy command being wrong. **If a freshly
+`clasp deploy`'d web app 404s or shows a Drive file-not-found page, try `clasp undeploy` +
+`clasp deploy` once more (new deployment ID) before assuming a manual editor pass is required** —
+it may resolve on retry alone.
+
 **Domain-restricted URLs look different.** A deployment manually configured for "Anyone within
 [organization]" gets a domain-scoped URL shaped
 `https://script.google.com/a/macros/<domain>/s/<deploymentId>/exec` (note the `/a/macros/<domain>/`
