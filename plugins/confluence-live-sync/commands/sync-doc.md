@@ -268,43 +268,61 @@ notes-push direction, and continue on to step 6.
         `flowchart TD` — so the long edge tracks "how much diagram there is" far better than either
         dimension alone, and far better than counting nodes in the `.mmd` source, which doesn't
         account for label length or subgraph nesting).
-     c. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 900), 4, 7)`, THEN clamp it a
+     c. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 300), 5, 16)`, THEN clamp it a
         second time against a hard pixel-area ceiling (see the "Chromium canvas-area limit" explainer
-        below) — `scale = min(scale, floor(sqrt(230_000_000 / (probeWidth * probeHeight))))`, with a
-        floor of 1 on that second clamp so a diagram that's already huge at its natural size never
-        divides down to 0. In practice this second clamp only ever bites on the tallest diagram on a
-        page (a `flowchart TD` many thousands of px tall after the font-size bump in step (a)) — small
-        and medium diagrams stay governed entirely by the width-based formula above.
-        Calibrated against 5 real diagrams on a real page, in two rounds: the first round (divisor
-        1300, floor 3, ceiling 6) landed a 3988px-tall diagram at scale 4 and four 1700-2400px
-        diagrams at scale 3 — legible, but the user asked for still more definition after seeing it
-        live, so the divisor was tightened and the floor raised, moving the same diagrams to scale 5
-        and scale 4 respectively. The floor keeps even small diagrams comfortably supersampled (a
-        flat `-s 1` was confirmed too blurry to read on zoom). Adjust the divisor/floor/ceiling only
-        if a real diagram's rendered legibility says otherwise — don't tune this from first
-        principles alone. **The width-based ceiling (7) is deliberately NOT raised further as a
-        legibility fix** — see the font-size explainer below for why scale doesn't move the needle on
-        legibility the way font-size does. **The pixel-area ceiling (230,000,000) is a different,
-        correctness-not-legibility constraint — see "Chromium canvas-area limit" below — and must
-        never be removed or raised without re-verifying against that limit.**
+        below) — `scale = min(scale, floor10(sqrt(240_000_000 / (probeWidth * probeHeight))))` (round
+        the area-derived scale DOWN to one decimal place, not a whole number — the safety margin is
+        narrow enough that whole-number rounding wastes real resolution on diagrams the area cap
+        governs), with a floor of 4 on the final result so a diagram that's already huge at its
+        natural size never divides down to something blurry. In practice this second clamp only ever
+        bites on the tallest diagram on a page (a `flowchart TD` many thousands of px tall after the
+        font-size bump in step (a)) — small and medium diagrams stay governed entirely by the
+        width-based formula above, which is now the binding constraint for most diagrams on a typical
+        page, not the exception.
+        Calibrated against 4 real diagrams on a real page, in three rounds: round 1 (divisor 1300,
+        floor 3, ceiling 6) landed a 3988px-tall diagram at scale 4 and smaller diagrams at scale 3.
+        Round 2 (divisor 900, floor 4, ceiling 7) tightened that after the user asked for more
+        definition. Round 3 (this one) found, by actually checking which clamp bound each diagram, that
+        3 of 4 diagrams on the real page were landing on the width-formula's FLOOR (scale 4) with the
+        pixel-area budget barely touched (e.g. a diagram using only ~24M of a 230M px cap) — the area
+        cap was never the bottleneck for anything but the single tallest diagram, so tightening the
+        area cap alone (as round 3 first tried) barely moved the needle on the user's actual complaint
+        ("Flujo 3 es masivo pero le falta resolución"). The real fix was tightening the width-formula
+        divisor (900→300) and floor (4→5) so diagrams that aren't anywhere near the area ceiling
+        render sharper too. Verified on the real page: the tallest diagram went 7→7.4 (modest, it's
+        area-capped), but the other three went 4→6, 4→7, and 4→9 respectively — a real, visible jump.
+        Adjust the divisor/floor/ceiling only if a real diagram's rendered legibility says otherwise —
+        don't tune this from first principles alone, and don't assume the area cap is what's limiting
+        a diagram without checking which clamp actually bound its scale. **The pixel-area ceiling is a
+        different, correctness-not-legibility constraint — see "Chromium canvas-area limit" below —
+        and must never be removed or raised without re-verifying against that limit by direct render
+        testing, not by trusting a previously-documented number.**
 
      **Chromium canvas-area limit — a real ceiling that WAS hit, don't re-raise scale past it.**
      `mmdc` renders via Puppeteer/Chromium, which silently corrupts (not errors) output once the
-     total canvas area exceeds roughly 268,435,456px (16384²) — it does not crop or refuse, it
-     produces a PNG with random-looking overlapping/misplaced node boxes partway down the image
-     (confirmed: `flujo-salida-pickers-lote.mmd` with the fontSize=18px directive from step (a)
-     rendered clean at `-s 6` — 4704×33126, 155.8M px total — and visibly corrupted at `-s 10` —
-     7840×55210, 432.8M px total, same source file, same font-size directive, only the scale differed
-     — isolated by re-rendering both and reading the resulting PNGs directly). This was initially
-     misreported by the user as "todo amarillo" / a cropping-and-merge bug — it is neither: there is
-     no crop/merge step anywhere in this pipeline (single `mmdc` invocation per diagram, one
-     screenshot, no tiling/stitching code exists in this plugin or the sibling `pickit-sync-kickoff`)
-     and no color/classDef issue — it is Chromium's own canvas rasterizer overflowing silently on an
-     oversized single screenshot. The fix is the 230M px-area cap in step (c) above (kept comfortably
-     under the ~268M observed failure point for safety margin) — NOT reverting the font-size
-     legibility fix, NOT cropping into bands, NOT lowering the width-based scale ceiling. Verified
-     fix: `flujo-salida-pickers-lote.mmd` at the resulting `-s 7` (5488×38647, 212M px) rendered clean
-     across the full height (checked top, middle, and bottom thirds directly, not just a probe).
+     total canvas area exceeds some threshold — it does not crop or refuse, it produces a PNG with
+     random-looking overlapping/misplaced node boxes and blank pale-yellow rectangles blotting out
+     content partway down the image. **The failure boundary is narrower than earlier documented here
+     — re-verify by direct binary-search testing before trusting any single number in this file.**
+     Round 2 estimated ~268,435,456px (16384²) from two widely-spaced test points (clean at 155.8M,
+     corrupt at 432.8M) and set a 230M cap. Round 3 binary-searched with closer test points on
+     `flujo-salida-pickers-lote.mmd` (same fontSize=18px directive, only `-s` varied) and found: clean
+     at `-s 7.5` (5880×41408, 243.5M px, checked top/q1/mid/q3/bottom — all clean) and corrupted at
+     `-s 7.6` (5958×41960, 250.0M px — same "blank yellow rectangle overlapping content" signature
+     confirmed at the SAME position as the round-1 `-s 8`/277M corruption, i.e. this is one consistent
+     failure mode, not two different bugs). So the true wall sits between 243.5M and 250.0M px — NOT
+     268M. **Production cap is now 240,000,000px** (comfortable margin below the confirmed-clean 243.5M
+     point, meaningful headroom above the old 230M cap). This was originally misreported by the user
+     as "todo amarillo" / a cropping-and-merge bug — it is neither: there is no crop/merge step
+     anywhere in this pipeline (single `mmdc` invocation per diagram, one screenshot, no
+     tiling/stitching code exists in this plugin or the sibling `pickit-sync-kickoff`) and no
+     color/classDef issue — it is Chromium's own canvas rasterizer overflowing silently on an oversized
+     single screenshot, and the pale-yellow blank-rectangle artifact is that overflow's visual
+     signature, not a missing `class` assignment. The fix is the pixel-area cap in step (c) above — NOT
+     reverting the font-size legibility fix, NOT cropping into bands, NOT trusting the previous 268M/
+     230M numbers without re-testing. Verified fix (round 3): `flujo-salida-pickers-lote.mmd` at the
+     resulting `-s 7.4` (5802×40855, 237.0M px) rendered clean across 5 sampled bands (top, q1, mid,
+     q3, bottom) checked directly, not just a probe.
      d. **Final pass** — render for real at the computed scale, discard the probe file:
         ```
         mmdc -i "<scratchpad>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent -s <scale>
@@ -336,8 +354,13 @@ notes-push direction, and continue on to step 6.
      would otherwise exist to solve. Cropping still adds real complexity (N attachments per diagram,
      N figure blocks, harder to keep in sync when the source `.mmd` changes) for no upside once the
      area cap is in place. Not implemented; revisit only if the pixel-area cap alone is ever
-     insufficient (e.g. a diagram whose width-based scale-7 target still exceeds 230M px at its
-     *natural* pre-cap size — hasn't happened on any diagram seen so far).
+     insufficient (e.g. a diagram whose width-based scale-16 target still exceeds 240M px at its
+     *natural* pre-cap size — hasn't happened on any diagram seen so far, but the ceiling was raised
+     from 7 to 16 in round 3, so re-check this if a genuinely enormous new diagram shows up).
+
+     **`-s` accepts a decimal value** (e.g. `-s 7.4`), not just an integer — use the full computed
+     value, don't round to a whole scale, since the safety margin under the corruption boundary is
+     narrow enough that whole-number rounding throws away real, safe resolution.
   2. **Upload the PNG as a page attachment via the Confluence REST API** (v1 — the v2 API has no
      write endpoint for attachments), authenticated with an Atlassian API token retrieved via
      `Get-ConfluenceApiToken` (defined below) — never a bare `$env:CONFLUENCE_API_TOKEN` check, and
