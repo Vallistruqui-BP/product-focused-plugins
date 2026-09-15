@@ -226,9 +226,95 @@ notes-push direction, and continue on to step 6.
   real content via the Drive connector's `read_file_content`. Never treat the raw shortcut JSON as
   content.
 - **`.md`**: read directly with the `Read` tool.
-- **`.mmd`**: Mermaid flowchart source (flowchart-builder plugin's format), not prose. **Render it to
-  a real image and attach it to the page** — a script-based render + REST-API upload, no browser
-  automation:
+- **`.mmd`**: Mermaid flowchart source (flowchart-builder plugin's format), not prose.
+
+  **0. Detect native Mermaid support once per run, before processing any `.mmd` file.** Some
+  Confluence instances have a Mermaid-rendering marketplace app installed (confirmed present on
+  `pickit.atlassian.net` as of 2026-09-15 — corrects an earlier note in this file from 2026-09-03
+  claiming none was installed; app availability can change over time, so always re-check live, never
+  trust a cached yes/no from a previous run or from this file's own history). When present, embed the
+  diagram as a **live native macro** instead of a rendered PNG — strictly better whenever available:
+  no Chromium canvas-corruption risk, no resolution/legibility tradeoffs, no attachment-version
+  churn, infinitely zoomable, always reflects the exact current `.mmd` source with zero render step.
+  ```powershell
+  $token = Get-ConfluenceApiToken
+  $authPair = "<account email>:$token"
+  $auth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($authPair))
+  try {
+    $plugins = Invoke-RestMethod -Uri "https://$($config.cloudId)/wiki/rest/plugins/1.0/" -Headers @{Authorization="Basic $auth"}
+    $mermaidApp = $plugins.plugins | Where-Object { $_.key -eq "tech.labs.app.mermaid" -and $_.enabled }
+    $nativeMermaidAvailable = [bool]$mermaidApp
+  } catch {
+    $nativeMermaidAvailable = $false   # 401/403/any failure => treat as unavailable, never block the sync on this check
+  }
+  ```
+  This endpoint (`/wiki/rest/plugins/1.0/`) needs admin-level API-token scope to list installed
+  plugins — a token without that scope will 401/403 here, which is a normal, expected configuration
+  (not a bug) and must silently fall through to the PNG path below, no error surfaced to the user for
+  this specific failure mode. Check once at the start of this run and reuse the result for every
+  `.mmd` file processed — don't re-check per diagram.
+
+  **Gotcha that will burn a future editor: the app key is not the macro's extension key.** The
+  installed-plugins listing above reports the app under key `tech.labs.app.mermaid` — that string is
+  *only* useful for the detection check above. It is **not** what goes in `data-extension-key` when
+  embedding the macro; using it there produces a structurally-valid extension node that publishes
+  fine but renders "Error al cargar la extensión" (confirmed by trying it directly). The actual
+  extension key for embedding is **`mermaidjs`**, discovered by inserting the macro through
+  Confluence's own editor UI (the "+" insert-block menu → search "mermaid" → "Mermaid for Confluence"
+  → paste a diagram → Insert → publish) and reading back the real markup Confluence generated via
+  `getConfluencePage`.
+
+  **If native Mermaid is available (`$nativeMermaidAvailable = $true`), embed this node** at the
+  point in the merged HTML where the diagram belongs, using the diagram's raw, unmodified `.mmd`
+  content (do **not** prepend the `fontSize` init directive from the PNG path below — that directive
+  exists purely to work around a fixed-pixel-display-width legibility problem that doesn't apply to a
+  live-rendered vector diagram; sending it here would just permanently bake an oversized font into the
+  live diagram's own definition for no reason):
+  ```html
+  <div data-type="extension" data-extension-key="mermaidjs" data-extension-type="com.atlassian.confluence.macro.core" data-layout="default" data-parameters="<see below>"></div>
+  ```
+  `data-parameters` is a **triple-encoded** string — get this wrong and the macro silently fails to
+  render (structurally valid, empty/broken on screen) rather than erroring loudly, so build it
+  carefully in this exact order:
+  1. Start with the Mermaid source as a plain string (the `.mmd` file's raw content, verbatim).
+  2. JSON-encode `{"diagramDefinition": "<that string, with real newlines escaped to literal \n and
+     any \" escaped>"}` — this produces a JSON string like
+     `{"diagramDefinition":"flowchart TD\n    A-->B"}`.
+  3. That whole JSON string becomes the **value** of `macroParams.__bodyContent.value` inside a larger
+     JSON object:
+     ```json
+     {
+       "macroParams": {
+         "fileName": {"value": "mermaid_<unique id, e.g. epoch millis>"},
+         "_parentId": {"value": "<pageId, as a string>"},
+         "theme": {"value": "default"},
+         "version": {"value": "2"},
+         "__bodyContent": {"value": "<the step-2 JSON string, itself embedded as a JSON string value>"}
+       },
+       "macroMetadata": {
+         "macroId": {"value": "<any random v4 UUID>"},
+         "schemaVersion": {"value": "1"},
+         "placeholder": [{"type": "icon", "data": {"url": "https://mermaidtechlabs.herokuapp.com/images/mermaid_icon.png"}}],
+         "title": "Mermaid for Confluence"
+       }
+     }
+     ```
+  4. Serialize *that* whole object to a JSON string, then HTML-entity-escape it (`"` → `&quot;`) to
+     become the literal `data-parameters="..."` attribute value in the HTML you send to
+     `updateConfluencePage`. `theme`/`version`/`schemaVersion`/`title`/`placeholder` are fixed
+     literals — copy them as shown, no need to vary them. Only `fileName`, `_parentId`,
+     `__bodyContent`, and `macroId` are per-diagram/per-page values.
+  Confirmed working end-to-end this way on a real page (published via `updateConfluencePage`,
+  re-fetched via `getConfluencePage` to confirm the round-trip matches, and visually confirmed in a
+  real browser — the diagram rendered as actual boxes/arrows/decision-diamonds, not an error
+  placeholder). Since the diagram is now live and self-documenting, skip the collapsed
+  "Ver código Mermaid" `<details>` block (point 5 further below) for this path — it exists only to
+  keep the raw source discoverable next to a static PNG, which is unnecessary when the diagram *is*
+  the live source.
+
+  **If native Mermaid is NOT available** (`$nativeMermaidAvailable = $false`), fall back to the full
+  PNG render/upload/figure-embed pipeline below, unchanged — **render it to a real image and attach it
+  to the page**, a script-based render + REST-API upload, no browser automation:
 
   1. **Render to PNG at an adaptive resolution** via the `@mermaid-js/mermaid-cli` npm package
      (command `mmdc`; bundles its own headless Chromium via Puppeteer — no desktop app, no admin
@@ -475,12 +561,14 @@ notes-push direction, and continue on to step 6.
      couldn't be produced.
 
   Never paste the raw Mermaid text as a **visible, uncollapsed** code block *instead of* rendering
-  the image — a site with no Mermaid-rendering marketplace app installed will only show raw Mermaid
-  text as plain/unrendered text or "Error al cargar la extensión," never an actual diagram (confirmed
-  on `pickit.atlassian.net`, 2026-09-03 — don't assume every Confluence site this plugin targets has
-  one installed either, since this plugin isn't Pickit-specific). The collapsed block from point 5 is
-  additive context alongside the rendered PNG, not a substitute for it — always render and attach the
-  PNG per points 1-4 when the token is available.
+  the image — on a site where step 0's detection says native Mermaid isn't available (or wasn't
+  checked), raw Mermaid text left unrendered just shows as plain text or "Error al cargar la
+  extensión," never an actual diagram (this is genuinely instance-dependent — `pickit.atlassian.net`
+  did NOT have a Mermaid app as of 2026-09-03, but DOES as of 2026-09-15; don't assume any given site
+  this plugin targets has one installed, since this plugin isn't Pickit-specific — always run step 0's
+  live detection, never assume based on this file's history). The collapsed block from point 5 is
+  additive context alongside the rendered PNG in the fallback path, not a substitute for it — always
+  render and attach the PNG per points 1-4 when the token is available and native Mermaid isn't.
 
 If a file can't be read this way, skip it and note it as unreadable — don't fail the whole run.
 
