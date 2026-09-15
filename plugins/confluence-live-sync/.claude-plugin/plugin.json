@@ -1,7 +1,7 @@
 {
   "name": "confluence-live-sync",
   "description": "Keeps a Confluence page in sync with a local project folder whose name matches a Jira issue's summary -- generic/reusable version of the folder-name-to-Jira-issue matching pattern, config-driven (no hardcoded project/template), bidirectional (local files merge into the page; the page mirrors back into a local file), and watchable in the background via a Windows Scheduled Task running headless Claude Code.",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "author": {
     "name": "pvallarino"
   },

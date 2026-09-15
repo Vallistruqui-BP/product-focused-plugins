@@ -268,21 +268,43 @@ notes-push direction, and continue on to step 6.
         `flowchart TD` — so the long edge tracks "how much diagram there is" far better than either
         dimension alone, and far better than counting nodes in the `.mmd` source, which doesn't
         account for label length or subgraph nesting).
-     c. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 900), 4, 7)`. Calibrated
-        against 5 real diagrams on a real page, in two rounds: the first round (divisor 1300, floor
-        3, ceiling 6) landed a 3988px-tall diagram at scale 4 and four 1700-2400px diagrams at scale
-        3 — legible, but the user asked for still more definition after seeing it live, so the
-        divisor was tightened and the floor raised, moving the same diagrams to scale 5 and scale 4
-        respectively. The floor keeps even small diagrams comfortably supersampled (a flat `-s 1`
-        was confirmed too blurry to read on zoom), and the ceiling keeps an unusually large
-        diagram's file size sane (a diagram many times larger than any seen so far would otherwise
-        scale its file size unboundedly). Adjust the divisor/floor/ceiling only if a real diagram's
-        rendered legibility says otherwise — don't tune this from first principles alone. **This
-        ceiling is deliberately NOT raised further as a legibility fix** — see the explainer below
-        for why scale doesn't move the needle on legibility the way font-size does; one real diagram
-        on this project already reaches ~5488×41391px at scale 7, and pushing scale higher on
-        diagrams already that large mainly bloats file size for no visible gain at the fixed display
-        width.
+     c. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 900), 4, 7)`, THEN clamp it a
+        second time against a hard pixel-area ceiling (see the "Chromium canvas-area limit" explainer
+        below) — `scale = min(scale, floor(sqrt(230_000_000 / (probeWidth * probeHeight))))`, with a
+        floor of 1 on that second clamp so a diagram that's already huge at its natural size never
+        divides down to 0. In practice this second clamp only ever bites on the tallest diagram on a
+        page (a `flowchart TD` many thousands of px tall after the font-size bump in step (a)) — small
+        and medium diagrams stay governed entirely by the width-based formula above.
+        Calibrated against 5 real diagrams on a real page, in two rounds: the first round (divisor
+        1300, floor 3, ceiling 6) landed a 3988px-tall diagram at scale 4 and four 1700-2400px
+        diagrams at scale 3 — legible, but the user asked for still more definition after seeing it
+        live, so the divisor was tightened and the floor raised, moving the same diagrams to scale 5
+        and scale 4 respectively. The floor keeps even small diagrams comfortably supersampled (a
+        flat `-s 1` was confirmed too blurry to read on zoom). Adjust the divisor/floor/ceiling only
+        if a real diagram's rendered legibility says otherwise — don't tune this from first
+        principles alone. **The width-based ceiling (7) is deliberately NOT raised further as a
+        legibility fix** — see the font-size explainer below for why scale doesn't move the needle on
+        legibility the way font-size does. **The pixel-area ceiling (230,000,000) is a different,
+        correctness-not-legibility constraint — see "Chromium canvas-area limit" below — and must
+        never be removed or raised without re-verifying against that limit.**
+
+     **Chromium canvas-area limit — a real ceiling that WAS hit, don't re-raise scale past it.**
+     `mmdc` renders via Puppeteer/Chromium, which silently corrupts (not errors) output once the
+     total canvas area exceeds roughly 268,435,456px (16384²) — it does not crop or refuse, it
+     produces a PNG with random-looking overlapping/misplaced node boxes partway down the image
+     (confirmed: `flujo-salida-pickers-lote.mmd` with the fontSize=18px directive from step (a)
+     rendered clean at `-s 6` — 4704×33126, 155.8M px total — and visibly corrupted at `-s 10` —
+     7840×55210, 432.8M px total, same source file, same font-size directive, only the scale differed
+     — isolated by re-rendering both and reading the resulting PNGs directly). This was initially
+     misreported by the user as "todo amarillo" / a cropping-and-merge bug — it is neither: there is
+     no crop/merge step anywhere in this pipeline (single `mmdc` invocation per diagram, one
+     screenshot, no tiling/stitching code exists in this plugin or the sibling `pickit-sync-kickoff`)
+     and no color/classDef issue — it is Chromium's own canvas rasterizer overflowing silently on an
+     oversized single screenshot. The fix is the 230M px-area cap in step (c) above (kept comfortably
+     under the ~268M observed failure point for safety margin) — NOT reverting the font-size
+     legibility fix, NOT cropping into bands, NOT lowering the width-based scale ceiling. Verified
+     fix: `flujo-salida-pickers-lote.mmd` at the resulting `-s 7` (5488×38647, 212M px) rendered clean
+     across the full height (checked top, middle, and bottom thirds directly, not just a probe).
      d. **Final pass** — render for real at the computed scale, discard the probe file:
         ```
         mmdc -i "<scratchpad>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent -s <scale>
@@ -305,14 +327,17 @@ notes-push direction, and continue on to step 6.
      flat, height grows, meaning text now claims more of that same fixed width). **Do not try to fix
      legibility by raising the scale ceiling — it does not work; raise the font-size instead.**
 
-     **On cropping/merging a very tall diagram into bands (considered and rejected):** this doesn't
-     help legibility either, for the same underlying reason — a cropped vertical band still renders
-     at the same fixed column width as the uncropped image, so per-box text stays the same visual
-     size; cropping only helps if a single image were hitting a genuine file-size/dimension ceiling
-     (not something observed on this project's diagrams so far — see the size example in step (c)),
-     and it adds real complexity (N attachments per diagram, N figure blocks, harder to keep in sync
-     when the source `.mmd` changes). Not implemented; revisit only if a diagram is ever large enough
-     to actually fail to upload or render.
+     **On cropping/merging a very tall diagram into bands (considered and rejected twice):** doesn't
+     help legibility, for the same underlying reason — a cropped vertical band still renders at the
+     same fixed column width as the uncropped image, so per-box text stays the same visual size. A
+     genuine dimension ceiling WAS later found (see "Chromium canvas-area limit" above) — but the fix
+     for that is capping `-s` via the pixel-area formula in step (c), not cropping/stitching; a
+     single clean `mmdc` screenshot under the area cap has no seam-artifact risk that band-splitting
+     would otherwise exist to solve. Cropping still adds real complexity (N attachments per diagram,
+     N figure blocks, harder to keep in sync when the source `.mmd` changes) for no upside once the
+     area cap is in place. Not implemented; revisit only if the pixel-area cap alone is ever
+     insufficient (e.g. a diagram whose width-based scale-7 target still exceeds 230M px at its
+     *natural* pre-cap size — hasn't happened on any diagram seen so far).
   2. **Upload the PNG as a page attachment via the Confluence REST API** (v1 — the v2 API has no
      write endpoint for attachments), authenticated with an Atlassian API token retrieved via
      `Get-ConfluenceApiToken` (defined below) — never a bare `$env:CONFLUENCE_API_TOKEN` check, and
