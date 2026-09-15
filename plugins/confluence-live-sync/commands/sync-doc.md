@@ -307,10 +307,34 @@ notes-push direction, and continue on to step 6.
   Confirmed working end-to-end this way on a real page (published via `updateConfluencePage`,
   re-fetched via `getConfluencePage` to confirm the round-trip matches, and visually confirmed in a
   real browser — the diagram rendered as actual boxes/arrows/decision-diamonds, not an error
-  placeholder). Since the diagram is now live and self-documenting, skip the collapsed
-  "Ver código Mermaid" `<details>` block (point 5 further below) for this path — it exists only to
-  keep the raw source discoverable next to a static PNG, which is unnecessary when the diagram *is*
-  the live source.
+  placeholder).
+
+  **`fileName` must be unique across every macro instance on the page — this is a real gotcha, not
+  a nice-to-have.** The app appears to key each diagram's stored definition by this value; two
+  `mermaidjs` macros sharing the same `fileName` silently fail to render **both** of them (no error,
+  no placeholder — just a gap between the preceding paragraph and the following content, exactly
+  like the diagram was never inserted). This bit a real migration: a naive
+  `int(time.time()*1000000) % 10**13` generator produced the *same* value for two diagrams rendered
+  in the same script run (sub-millisecond collision), breaking both silently — only caught by
+  actually opening the published page in a browser and noticing the diagram was missing, not by
+  trusting the API round-trip (a structurally valid extension node with a colliding `fileName` still
+  round-trips fine through `getConfluencePage`, so that check alone does **not** catch this). Use a
+  generator that's guaranteed unique across a whole batch — e.g. epoch-millis plus a monotonically
+  incrementing per-run counter, not epoch-micros modulo-truncated — and after publishing **always
+  visually confirm each diagram actually rendered**, not just that the page saved.
+
+  **Always keep a collapsed "Ver código Mermaid" `<details>`/`expand`-macro block with the raw
+  Mermaid source immediately below the native embed, for every diagram, even though the diagram
+  itself is live** — this was tried as "skip it, the diagram is self-documenting" in an earlier
+  revision, but the user explicitly asked to keep the source visible underneath regardless, so it's
+  not optional: build it the same way as the PNG path's source block (point 5 below produces the
+  `<details><summary>Ver código Mermaid</summary><pre><code class="language-plaintext">...</code>
+  </pre></details>` shape for the HTML content-format path; in raw Confluence storage format it's
+  `<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">Ver código Mermaid</ac:parameter>
+  <ac:rich-text-body><ac:structured-macro ac:name="code"><ac:parameter ac:name="language">text</ac:parameter>
+  <ac:plain-text-body><![CDATA[<raw .mmd source>]]></ac:plain-text-body></ac:structured-macro>
+  </ac:rich-text-body></ac:structured-macro>` — match whichever content format you're actually
+  publishing through).
 
   **If native Mermaid is NOT available** (`$nativeMermaidAvailable = $false`), fall back to the full
   PNG render/upload/figure-embed pipeline below, unchanged — **render it to a real image and attach it
