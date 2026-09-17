@@ -112,11 +112,13 @@ considering setup done.
   back further than ~90 days, add `long-term-search=true` -- the 1-month
   cap still applies per call, so a wide historical search means looping
   month-by-month across the range and across every channel-id.
-- Practical recipe for "find this contact's conversation(s)": get all
-  `channel-id`s via `get_channels()`, then call `get_messages()` per
-  channel with `contact-id` + a `from`/`to` window, moving the window
-  back a month at a time (adding `long-term-search=true` once you're past
-  ~90 days) until you hit results or give up.
+- **Don't hand-roll the recipe above** -- `find_contact_messages(phone_or_contact_id, months_back=24)`
+  in `botmaker_client.py` already does it: normalizes a phone number via
+  `normalize_ar_contact_id()` (Argentina-specific -- adjust it for other
+  countries), loops every channel x month, adds `long-term-search` past
+  80 days, and returns everything sorted oldest-first. Also reachable
+  straight from the CLI:
+  `python botmaker_client.py --find-contact "1134230676" --months-back 8 --out messages.json`.
 
 ## Where this came from
 

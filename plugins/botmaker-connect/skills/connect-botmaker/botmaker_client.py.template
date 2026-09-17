@@ -15,11 +15,13 @@ Botmaker's swagger.
 >>> FILL IN BEFORE FIRST USE <<<
 """
 import json
+import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE_URL = "https://api.botmaker.com/v2.0"
@@ -185,12 +187,82 @@ def get_sessions(**params) -> list:
     return list(paginate("/sessions", params=params))
 
 
+def normalize_ar_contact_id(phone: str) -> str:
+    """Best-effort conversion of an Argentine phone number (any of the
+    ways someone might paste it: with spaces, dashes, "+", a leading "0",
+    a "15", or already the full WhatsApp contact ID) into the
+    `<country><9><area+number>` format Botmaker uses as `contact-id`,
+    e.g. "11 3423-0676" or "01134230676" -> "5491134230676". Passes
+    through unchanged if it already starts with "54". This is a
+    convenience for the common case, not a general phone-number library --
+    verify the result if the number has an unusual shape (landline, other
+    country, etc.). >>> FILL IN: if this workspace isn't Argentina, replace
+    this with the right normalization for that country/format, or drop it
+    and always pass a fully-formed contact-id. <<<"""
+    digits = re.sub(r"\D", "", phone)
+    if digits.startswith("54"):
+        return digits
+    digits = digits.lstrip("0")
+    digits = re.sub(r"^15", "", digits) if len(digits) > 10 else digits
+    return "549" + digits
+
+
+def find_contact_messages(phone_or_contact_id: str, months_back: int = 24, channel_ids: list = None) -> list:
+    """Finds a contact's message history without relying on `/sessions`
+    (whose filters don't work -- see get_sessions()'s docstring). Loops
+    every active channel (or `channel_ids` if given) across `months_back`
+    trailing 1-month windows, adding `long-term-search=true` once a window
+    is older than 80 days, and returns every message found across all of
+    it, oldest first. Costs one API call per (channel x month) with no
+    hits, so keep `months_back` as tight as the user's context allows --
+    24 is a safe default for "when did this contact last write in," not
+    for routine use.
+
+    `phone_or_contact_id` is run through normalize_ar_contact_id() unless
+    it already starts with "54"."""
+    contact_id = phone_or_contact_id if phone_or_contact_id.startswith("54") else normalize_ar_contact_id(phone_or_contact_id)
+    channels = channel_ids or [c["id"] for c in get_channels()]
+    now = datetime.now(timezone.utc)
+    fmt = lambda d: d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    results = []
+    for months_ago in range(months_back):
+        to_dt = now - timedelta(days=30 * months_ago)
+        from_dt = to_dt - timedelta(days=29)
+        params = {"contact-id": contact_id, "from": fmt(from_dt), "to": fmt(to_dt)}
+        if (now - from_dt).days > 80:
+            params["long-term-search"] = "true"
+        for channel_id in channels:
+            try:
+                items = call("GET", "/messages", params={**params, "channel-id": channel_id}).get("items", [])
+                results.extend(items)
+            except BotmakerAPIError:
+                continue  # a channel/window with no traffic for this contact is expected, not an error
+
+    results.sort(key=lambda m: m.get("creationTime", ""))
+    return results
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Set up or smoke-test the Botmaker API v2.0 connection.")
     parser.add_argument("--setup", action="store_true", help="Interactively paste and save credentials.")
+    parser.add_argument("--find-contact", metavar="PHONE", help="Search a contact's message history across all channels/months and print a summary.")
+    parser.add_argument("--months-back", type=int, default=24, help="How many trailing 1-month windows to search with --find-contact (default 24).")
+    parser.add_argument("--out", metavar="PATH", help="With --find-contact, also write the full message list as JSON to this path.")
     args = parser.parse_args()
+
+    if args.find_contact:
+        messages = find_contact_messages(args.find_contact, months_back=args.months_back)
+        if not messages:
+            print(f"No messages found for {args.find_contact} in the last {args.months_back} months.")
+        else:
+            print(f"{len(messages)} message(s) found -- {messages[0]['creationTime']} to {messages[-1]['creationTime']}")
+        if args.out:
+            Path(args.out).write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"Full detail written to {args.out}")
+        return
 
     if args.setup:
         access_token = input("Access token: ").strip()
