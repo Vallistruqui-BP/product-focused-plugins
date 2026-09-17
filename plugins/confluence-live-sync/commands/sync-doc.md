@@ -70,6 +70,29 @@ Edits made to it locally get pushed back; edits made on the page get pulled down
 changed since the last sync, this does a real three-way merge and only ever asks a human to resolve
 an actual overlapping conflict — it never silently picks a winner.
 
+**Known limitation — why every markdown push snapshots comments automatically**: a full-body
+`updateConfluencePage` call with `contentFormat: "markdown"` strips Confluence's inline-comment
+anchor marks from the **entire** page body, not just the paragraphs actually being edited — markdown
+has no representation for an anchor mark at all, so the whole body effectively gets rebuilt without
+them. The comment *object* survives untouched (same ID, `resolutionStatus` still reports `"open"`,
+never flips to `"dangling"`) — only the highlight/anchor in the live content is gone, silently.
+Confirmed on a real page (3233677317, 2026-09-14): 10 inline comments across several rounds of
+markdown pushes went invisible with no error, no status change, and nobody noticed until a human
+asked about them directly. `contentFormat: "html"` pushes (step 5 below) are round-trip safe and do
+**not** have this problem — only the markdown-format push in this step does. That's why steps 3.1 and
+3.2 below are mandatory, not optional, and don't ask for confirmation — they're a cheap safety net
+around a push mode this plugin already always uses.
+
+### 3.1. Snapshot inline comments (before any push below)
+
+Run, once, before evaluating any of the four cases below:
+```powershell
+pwsh -File "<this plugin's own installed dir>/scripts/preserve-orphaned-comments.ps1" -Mode Snapshot -PageId $pageId
+```
+Resolve the script path relative to this plugin's own installed location, never hardcoded. If the
+script errors (e.g. missing API token), don't fail the whole run — note in the final report that
+comment-preservation was skipped this run, and continue with the mirror sync itself.
+
 1. Fetch the page via `getConfluencePage` (`contentFormat: "markdown"`). Call its body
    `$remoteMarkdown` and its `version.number` `$remoteVersion`.
 2. Read the current contents of `Confluence Sync.md` (empty string if it doesn't exist yet) as
@@ -149,6 +172,18 @@ And handle whichever case applies:
 body that contains a `<<<<<<<`/`|||||||`/`=======`/`>>>>>>>` marker line — treat that as an unresolved conflict
 and refuse the push, in case the file and the state/baseline ever fall out of step with each other.
 
+### 3.2. Reconcile any orphaned inline comments (after the mirror sync above)
+
+Run once, regardless of which of the four cases above fired (including "neither changed" — cheap and
+harmless if nothing was orphaned):
+```powershell
+pwsh -File "<this plugin's own installed dir>/scripts/preserve-orphaned-comments.ps1" -Mode Reconcile -PageId $pageId
+```
+Capture its stdout — it reports how many comments it checked and how many (if any) it found orphaned
+and reposted as footer comments. Include that count in the final report (step 8) so this is visible,
+not silent. If step 3.1's snapshot was skipped (missing token, etc.), this will have nothing to
+reconcile against — skip it too and note the same in the report.
+
 ## 4. Notes push: find new local files
 
 Recursively list files in the current working directory matching `sync.localFilePatterns` from
@@ -191,18 +226,251 @@ notes-push direction, and continue on to step 6.
   real content via the Drive connector's `read_file_content`. Never treat the raw shortcut JSON as
   content.
 - **`.md`**: read directly with the `Read` tool.
-- **`.mmd`**: Mermaid flowchart source (flowchart-builder plugin's format), not prose. **Render it to
-  a real image and attach it to the page** — a script-based render + REST-API upload, no browser
-  automation:
+- **`.mmd`**: Mermaid flowchart source (flowchart-builder plugin's format), not prose.
 
-  1. **Render to PNG** via the `@mermaid-js/mermaid-cli` npm package (command `mmdc`; bundles its own
-     headless Chromium via Puppeteer — no desktop app, no admin rights). Check with `mmdc -V`; if
-     missing, `npm install --global @mermaid-js/mermaid-cli` (needs Node/npm on PATH — check for a
-     portable Node install already present on the machine before assuming Node needs installing):
+  **0. Detect native Mermaid support once per run, before processing any `.mmd` file.** Some
+  Confluence instances have a Mermaid-rendering marketplace app installed (confirmed present on
+  `pickit.atlassian.net` as of 2026-09-15 — corrects an earlier note in this file from 2026-09-03
+  claiming none was installed; app availability can change over time, so always re-check live, never
+  trust a cached yes/no from a previous run or from this file's own history). When present, embed the
+  diagram as a **live native macro** instead of a rendered PNG — strictly better whenever available:
+  no Chromium canvas-corruption risk, no resolution/legibility tradeoffs, no attachment-version
+  churn, infinitely zoomable, always reflects the exact current `.mmd` source with zero render step.
+  ```powershell
+  $token = Get-ConfluenceApiToken
+  $authPair = "<account email>:$token"
+  $auth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($authPair))
+  try {
+    $plugins = Invoke-RestMethod -Uri "https://$($config.cloudId)/wiki/rest/plugins/1.0/" -Headers @{Authorization="Basic $auth"}
+    $mermaidApp = $plugins.plugins | Where-Object { $_.key -eq "tech.labs.app.mermaid" -and $_.enabled }
+    $nativeMermaidAvailable = [bool]$mermaidApp
+  } catch {
+    $nativeMermaidAvailable = $false   # 401/403/any failure => treat as unavailable, never block the sync on this check
+  }
+  ```
+  This endpoint (`/wiki/rest/plugins/1.0/`) needs admin-level API-token scope to list installed
+  plugins — a token without that scope will 401/403 here, which is a normal, expected configuration
+  (not a bug) and must silently fall through to the PNG path below, no error surfaced to the user for
+  this specific failure mode. Check once at the start of this run and reuse the result for every
+  `.mmd` file processed — don't re-check per diagram.
+
+  **Gotcha that will burn a future editor: the app key is not the macro's extension key.** The
+  installed-plugins listing above reports the app under key `tech.labs.app.mermaid` — that string is
+  *only* useful for the detection check above. It is **not** what goes in `data-extension-key` when
+  embedding the macro; using it there produces a structurally-valid extension node that publishes
+  fine but renders "Error al cargar la extensión" (confirmed by trying it directly). The actual
+  extension key for embedding is **`mermaidjs`**, discovered by inserting the macro through
+  Confluence's own editor UI (the "+" insert-block menu → search "mermaid" → "Mermaid for Confluence"
+  → paste a diagram → Insert → publish) and reading back the real markup Confluence generated via
+  `getConfluencePage`.
+
+  **If native Mermaid is available (`$nativeMermaidAvailable = $true`), embed this node** at the
+  point in the merged HTML where the diagram belongs, using the diagram's raw, unmodified `.mmd`
+  content (do **not** prepend the `fontSize` init directive from the PNG path below — that directive
+  exists purely to work around a fixed-pixel-display-width legibility problem that doesn't apply to a
+  live-rendered vector diagram; sending it here would just permanently bake an oversized font into the
+  live diagram's own definition for no reason):
+  ```html
+  <div data-type="extension" data-extension-key="mermaidjs" data-extension-type="com.atlassian.confluence.macro.core" data-layout="default" data-parameters="<see below>"></div>
+  ```
+  `data-parameters` is a **triple-encoded** string — get this wrong and the macro silently fails to
+  render (structurally valid, empty/broken on screen) rather than erroring loudly, so build it
+  carefully in this exact order:
+  1. Start with the Mermaid source as a plain string (the `.mmd` file's raw content, verbatim).
+  2. JSON-encode `{"diagramDefinition": "<that string, with real newlines escaped to literal \n and
+     any \" escaped>"}` — this produces a JSON string like
+     `{"diagramDefinition":"flowchart TD\n    A-->B"}`.
+  3. That whole JSON string becomes the **value** of `macroParams.__bodyContent.value` inside a larger
+     JSON object:
+     ```json
+     {
+       "macroParams": {
+         "fileName": {"value": "mermaid_<unique id, e.g. epoch millis>"},
+         "_parentId": {"value": "<pageId, as a string>"},
+         "theme": {"value": "default"},
+         "version": {"value": "2"},
+         "__bodyContent": {"value": "<the step-2 JSON string, itself embedded as a JSON string value>"}
+       },
+       "macroMetadata": {
+         "macroId": {"value": "<any random v4 UUID>"},
+         "schemaVersion": {"value": "1"},
+         "placeholder": [{"type": "icon", "data": {"url": "https://mermaidtechlabs.herokuapp.com/images/mermaid_icon.png"}}],
+         "title": "Mermaid for Confluence"
+       }
+     }
      ```
-     mmdc -i "<dir>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent
-     ```
+  4. Serialize *that* whole object to a JSON string, then HTML-entity-escape it (`"` → `&quot;`) to
+     become the literal `data-parameters="..."` attribute value in the HTML you send to
+     `updateConfluencePage`. `theme`/`version`/`schemaVersion`/`title`/`placeholder` are fixed
+     literals — copy them as shown, no need to vary them. Only `fileName`, `_parentId`,
+     `__bodyContent`, and `macroId` are per-diagram/per-page values.
+  Confirmed working end-to-end this way on a real page (published via `updateConfluencePage`,
+  re-fetched via `getConfluencePage` to confirm the round-trip matches, and visually confirmed in a
+  real browser — the diagram rendered as actual boxes/arrows/decision-diamonds, not an error
+  placeholder).
+
+  **`fileName` must be unique across every macro instance on the page — this is a real gotcha, not
+  a nice-to-have.** The app appears to key each diagram's stored definition by this value; two
+  `mermaidjs` macros sharing the same `fileName` silently fail to render **both** of them (no error,
+  no placeholder — just a gap between the preceding paragraph and the following content, exactly
+  like the diagram was never inserted). This bit a real migration: a naive
+  `int(time.time()*1000000) % 10**13` generator produced the *same* value for two diagrams rendered
+  in the same script run (sub-millisecond collision), breaking both silently — only caught by
+  actually opening the published page in a browser and noticing the diagram was missing, not by
+  trusting the API round-trip (a structurally valid extension node with a colliding `fileName` still
+  round-trips fine through `getConfluencePage`, so that check alone does **not** catch this). Use a
+  generator that's guaranteed unique across a whole batch — e.g. epoch-millis plus a monotonically
+  incrementing per-run counter, not epoch-micros modulo-truncated — and after publishing **always
+  visually confirm each diagram actually rendered**, not just that the page saved.
+
+  **Always keep a collapsed "Ver código Mermaid" `<details>`/`expand`-macro block with the raw
+  Mermaid source immediately below the native embed, for every diagram, even though the diagram
+  itself is live** — this was tried as "skip it, the diagram is self-documenting" in an earlier
+  revision, but the user explicitly asked to keep the source visible underneath regardless, so it's
+  not optional: build it the same way as the PNG path's source block (point 5 below produces the
+  `<details><summary>Ver código Mermaid</summary><pre><code class="language-plaintext">...</code>
+  </pre></details>` shape for the HTML content-format path; in raw Confluence storage format it's
+  `<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">Ver código Mermaid</ac:parameter>
+  <ac:rich-text-body><ac:structured-macro ac:name="code"><ac:parameter ac:name="language">text</ac:parameter>
+  <ac:plain-text-body><![CDATA[<raw .mmd source>]]></ac:plain-text-body></ac:structured-macro>
+  </ac:rich-text-body></ac:structured-macro>` — match whichever content format you're actually
+  publishing through).
+
+  **If native Mermaid is NOT available** (`$nativeMermaidAvailable = $false`), fall back to the full
+  PNG render/upload/figure-embed pipeline below, unchanged — **render it to a real image and attach it
+  to the page**, a script-based render + REST-API upload, no browser automation:
+
+  1. **Render to PNG at an adaptive resolution** via the `@mermaid-js/mermaid-cli` npm package
+     (command `mmdc`; bundles its own headless Chromium via Puppeteer — no desktop app, no admin
+     rights). Check with `mmdc -V`; if missing, `npm install --global @mermaid-js/mermaid-cli`
+     (needs Node/npm on PATH — check for a portable Node install already present on the machine
+     before assuming Node needs installing). **Never render with a single fixed `-s` value for
+     every diagram** — a flat scale factor either blurs large/dense diagrams when the viewer zooms
+     in, or wastefully bloats tiny diagrams that never needed the extra pixels. Instead, size the
+     scale to the diagram itself, in two passes:
+
+     a. **Prepend a font-size init directive to a scratch copy of the `.mmd` before rendering —
+        never render the checked-in file directly.** This is the primary legibility lever, and it is
+        NOT the same thing as the `-s` scale factor in step (b) below — see the explainer after this
+        list for why both exist and what each one actually fixes.
+        ```
+        %%{init: {'themeVariables': {'fontSize': '18px'}}}%%
+        <...rest of the .mmd file, unchanged...>
+        ```
+        Write this to `<scratchpad>/<basename>.mmd` (prepend the directive, then the original file's
+        full contents) and render THAT file in both the probe and final passes below — never the
+        original `<dir>/<basename>.mmd`, and never edit the checked-in source file itself to add
+        this line (keep the source diagrams clean/portable; the directive is a render-time-only
+        concern). `18px` was confirmed on a real diagram (`flujo-chequeo-proactivo-marcado-accidental.mmd`)
+        to grow node/box text noticeably without any width change (still 784px wide) — height grew
+        1570px → 1678px, i.e. boxes got taller/text wrapped more to fit the bigger font in the same
+        column width, which is exactly the effect wanted. Adjust the value only if a real diagram's
+        rendered legibility says otherwise.
+     b. **Probe pass** — render once at the `mmdc` default scale (no `-s` flag) to a scratch path,
+        to measure the diagram's own natural size:
+        ```
+        mmdc -i "<scratchpad>/<basename>.mmd" -o "<scratchpad>/<basename>-probe.png" -b transparent
+        ```
+        Read the PNG's own `IHDR` chunk for its pixel width/height (bytes 16-24 of the file: two
+        big-endian uint32s) — no image library needed, e.g. via a one-line Python `struct.unpack`
+        or PowerShell `[System.Drawing.Image]`. Take `longEdge = max(width, height)` as the
+        complexity signal (Mermaid flowcharts grow almost entirely in one axis — usually height for
+        `flowchart TD` — so the long edge tracks "how much diagram there is" far better than either
+        dimension alone, and far better than counting nodes in the `.mmd` source, which doesn't
+        account for label length or subgraph nesting).
+     c. **Compute the scale factor**: `scale = clamp(ceil(longEdge / 300), 5, 16)`, THEN clamp it a
+        second time against a hard pixel-area ceiling (see the "Chromium canvas-area limit" explainer
+        below) — `scale = min(scale, floor10(sqrt(240_000_000 / (probeWidth * probeHeight))))` (round
+        the area-derived scale DOWN to one decimal place, not a whole number — the safety margin is
+        narrow enough that whole-number rounding wastes real resolution on diagrams the area cap
+        governs), with a floor of 4 on the final result so a diagram that's already huge at its
+        natural size never divides down to something blurry. In practice this second clamp only ever
+        bites on the tallest diagram on a page (a `flowchart TD` many thousands of px tall after the
+        font-size bump in step (a)) — small and medium diagrams stay governed entirely by the
+        width-based formula above, which is now the binding constraint for most diagrams on a typical
+        page, not the exception.
+        Calibrated against 4 real diagrams on a real page, in three rounds: round 1 (divisor 1300,
+        floor 3, ceiling 6) landed a 3988px-tall diagram at scale 4 and smaller diagrams at scale 3.
+        Round 2 (divisor 900, floor 4, ceiling 7) tightened that after the user asked for more
+        definition. Round 3 (this one) found, by actually checking which clamp bound each diagram, that
+        3 of 4 diagrams on the real page were landing on the width-formula's FLOOR (scale 4) with the
+        pixel-area budget barely touched (e.g. a diagram using only ~24M of a 230M px cap) — the area
+        cap was never the bottleneck for anything but the single tallest diagram, so tightening the
+        area cap alone (as round 3 first tried) barely moved the needle on the user's actual complaint
+        ("Flujo 3 es masivo pero le falta resolución"). The real fix was tightening the width-formula
+        divisor (900→300) and floor (4→5) so diagrams that aren't anywhere near the area ceiling
+        render sharper too. Verified on the real page: the tallest diagram went 7→7.4 (modest, it's
+        area-capped), but the other three went 4→6, 4→7, and 4→9 respectively — a real, visible jump.
+        Adjust the divisor/floor/ceiling only if a real diagram's rendered legibility says otherwise —
+        don't tune this from first principles alone, and don't assume the area cap is what's limiting
+        a diagram without checking which clamp actually bound its scale. **The pixel-area ceiling is a
+        different, correctness-not-legibility constraint — see "Chromium canvas-area limit" below —
+        and must never be removed or raised without re-verifying against that limit by direct render
+        testing, not by trusting a previously-documented number.**
+
+     **Chromium canvas-area limit — a real ceiling that WAS hit, don't re-raise scale past it.**
+     `mmdc` renders via Puppeteer/Chromium, which silently corrupts (not errors) output once the
+     total canvas area exceeds some threshold — it does not crop or refuse, it produces a PNG with
+     random-looking overlapping/misplaced node boxes and blank pale-yellow rectangles blotting out
+     content partway down the image. **The failure boundary is narrower than earlier documented here
+     — re-verify by direct binary-search testing before trusting any single number in this file.**
+     Round 2 estimated ~268,435,456px (16384²) from two widely-spaced test points (clean at 155.8M,
+     corrupt at 432.8M) and set a 230M cap. Round 3 binary-searched with closer test points on
+     `flujo-salida-pickers-lote.mmd` (same fontSize=18px directive, only `-s` varied) and found: clean
+     at `-s 7.5` (5880×41408, 243.5M px, checked top/q1/mid/q3/bottom — all clean) and corrupted at
+     `-s 7.6` (5958×41960, 250.0M px — same "blank yellow rectangle overlapping content" signature
+     confirmed at the SAME position as the round-1 `-s 8`/277M corruption, i.e. this is one consistent
+     failure mode, not two different bugs). So the true wall sits between 243.5M and 250.0M px — NOT
+     268M. **Production cap is now 240,000,000px** (comfortable margin below the confirmed-clean 243.5M
+     point, meaningful headroom above the old 230M cap). This was originally misreported by the user
+     as "todo amarillo" / a cropping-and-merge bug — it is neither: there is no crop/merge step
+     anywhere in this pipeline (single `mmdc` invocation per diagram, one screenshot, no
+     tiling/stitching code exists in this plugin or the sibling `pickit-sync-kickoff`) and no
+     color/classDef issue — it is Chromium's own canvas rasterizer overflowing silently on an oversized
+     single screenshot, and the pale-yellow blank-rectangle artifact is that overflow's visual
+     signature, not a missing `class` assignment. The fix is the pixel-area cap in step (c) above — NOT
+     reverting the font-size legibility fix, NOT cropping into bands, NOT trusting the previous 268M/
+     230M numbers without re-testing. Verified fix (round 3): `flujo-salida-pickers-lote.mmd` at the
+     resulting `-s 7.4` (5802×40855, 237.0M px) rendered clean across 5 sampled bands (top, q1, mid,
+     q3, bottom) checked directly, not just a probe.
+     d. **Final pass** — render for real at the computed scale, discard the probe file:
+        ```
+        mmdc -i "<scratchpad>/<basename>.mmd" -o "<dir>/<basename>.png" -b transparent -s <scale>
+        ```
      One `.mmd` file is one diagram — no multi-page splitting concern.
+
+     **Why font-size (step a) and scale (step c) are different levers, and why scale alone never
+     fixed the "cajas ilegibles" complaint in earlier rounds:** the page's content column has a
+     fixed, genuine width (confirmed via a raw ADF probe on a real page: `layout: "wide"` normalizes
+     to the exact same `680px`/`pixel` as `layout: "center"` — only `layout: "full-width"` breaks out
+     wider, to `960px`, which overshoots the paragraph column and was rejected for that reason). The
+     `-s` scale factor uniformly multiplies EVERY pixel in the raster — the diagram's overall pixel
+     dimensions grow, but the ratio of "how much of the image's own width a box's text occupies"
+     never changes, so when the browser downscales that raster back down to fit the fixed 680px
+     column, the text renders at essentially the same *visual* size regardless of how high `-s` was
+     pushed (scale only buys crispness/DPI for zooming or retina displays, not bigger-looking text in
+     the normal inline view). The only way to make box text visually bigger at a *fixed* display
+     width is to make Mermaid itself draw bigger text relative to the diagram's own layout — which is
+     exactly what the `fontSize` theme variable in step (a) does (confirmed empirically: width stays
+     flat, height grows, meaning text now claims more of that same fixed width). **Do not try to fix
+     legibility by raising the scale ceiling — it does not work; raise the font-size instead.**
+
+     **On cropping/merging a very tall diagram into bands (considered and rejected twice):** doesn't
+     help legibility, for the same underlying reason — a cropped vertical band still renders at the
+     same fixed column width as the uncropped image, so per-box text stays the same visual size. A
+     genuine dimension ceiling WAS later found (see "Chromium canvas-area limit" above) — but the fix
+     for that is capping `-s` via the pixel-area formula in step (c), not cropping/stitching; a
+     single clean `mmdc` screenshot under the area cap has no seam-artifact risk that band-splitting
+     would otherwise exist to solve. Cropping still adds real complexity (N attachments per diagram,
+     N figure blocks, harder to keep in sync when the source `.mmd` changes) for no upside once the
+     area cap is in place. Not implemented; revisit only if the pixel-area cap alone is ever
+     insufficient (e.g. a diagram whose width-based scale-16 target still exceeds 240M px at its
+     *natural* pre-cap size — hasn't happened on any diagram seen so far, but the ceiling was raised
+     from 7 to 16 in round 3, so re-check this if a genuinely enormous new diagram shows up).
+
+     **`-s` accepts a decimal value** (e.g. `-s 7.4`), not just an integer — use the full computed
+     value, don't round to a whole scale, since the safety margin under the corruption boundary is
+     narrow enough that whole-number rounding throws away real, safe resolution.
   2. **Upload the PNG as a page attachment via the Confluence REST API** (v1 — the v2 API has no
      write endpoint for attachments), authenticated with an Atlassian API token retrieved via
      `Get-ConfluenceApiToken` (defined below) — never a bare `$env:CONFLUENCE_API_TOKEN` check, and
@@ -265,12 +533,34 @@ notes-push direction, and continue on to step 6.
      node syntax, with the `fileId`/`collection` from step 3 — insert this at the point in the
      merged HTML where the diagram belongs, not as a separate edit:
      ```html
-     <figure data-type="media-single" data-layout="center" data-width="80">
+     <figure data-type="media-single" data-layout="center" data-width="100" data-width-type="percentage">
        <div data-type="media" data-media-type="file" data-id="<fileId>" data-collection="<collection>" data-alt="<basename>.png"></div>
      </figure>
      ```
      Confirmed working end-to-end this way on a real page — this is the only syntax in this HTML
-     format that renders a real inline image from a REST-API-uploaded attachment.
+     format that renders a real inline image from a REST-API-uploaded attachment. `data-width="100"`
+     with `data-layout="center"` makes the diagram span the full paragraph width and stay centered,
+     matching the rest of the page's formatting — confirmed as the preferred default on a real page
+     after the user asked for wider diagrams twice (first from 80px effective to 80%, then from 80%
+     to 100%). **Never omit `data-width` entirely** — confirmed on a real page that omitting it makes
+     Confluence fall back to the image's own native pixel width (e.g. `5488px`) as a literal pixel
+     width, which badly overflows the content column; always send an explicit `data-width="100"`.
+     **Correction to earlier guidance in this file (previously claimed `data-width-type="percentage"`
+     was mandatory and its absence caused a near-invisible diagram) — re-investigated on a real page
+     via three direct ADF probes and found to be a misdiagnosis:** `data-width-type` is not
+     authoritative. Confluence silently normalizes `mediaSingle.attrs.widthType` to `"pixel"` on
+     write regardless of what width-type value the HTML/ADF send specifies (confirmed: an explicit
+     `widthType: "percentage"` sent via a raw ADF write round-tripped back as `{"width": 680,
+     "widthType": "pixel"}` — `680px` being this page's actual, correct, full-column-width value, not
+     a bug). The real variable that matters is the **numeric `data-width` value itself** — small
+     values like `80` (a leftover from an even earlier default, not `80%`) really did render a
+     near-invisible diagram, but that was because `80` was being stored as `80px` literal, not
+     because of a missing width-type flag; sending `data-width="100"` (the current default per this
+     step) resolves to the correct full-column width either way. **You do not need to set
+     `data-width-type` at all going forward** — `data-width="100"` alone is sufficient and is what
+     the official Confluence HTML-format guide's own canonical media example uses (no width-type).
+     Setting `data-width-type="percentage"` explicitly is harmless (it's simply overridden/ignored on
+     write) but no longer treated as load-bearing in this file.
   5. **Immediately after that `<figure>`, append a collapsed Mermaid-source block** — an `expand`
      (`<details>`) containing the diagram's raw `.mmd` text as-is, verbatim, in a code block:
      ```html
@@ -295,12 +585,14 @@ notes-push direction, and continue on to step 6.
      couldn't be produced.
 
   Never paste the raw Mermaid text as a **visible, uncollapsed** code block *instead of* rendering
-  the image — a site with no Mermaid-rendering marketplace app installed will only show raw Mermaid
-  text as plain/unrendered text or "Error al cargar la extensión," never an actual diagram (confirmed
-  on `pickit.atlassian.net`, 2026-09-03 — don't assume every Confluence site this plugin targets has
-  one installed either, since this plugin isn't Pickit-specific). The collapsed block from point 5 is
-  additive context alongside the rendered PNG, not a substitute for it — always render and attach the
-  PNG per points 1-4 when the token is available.
+  the image — on a site where step 0's detection says native Mermaid isn't available (or wasn't
+  checked), raw Mermaid text left unrendered just shows as plain text or "Error al cargar la
+  extensión," never an actual diagram (this is genuinely instance-dependent — `pickit.atlassian.net`
+  did NOT have a Mermaid app as of 2026-09-03, but DOES as of 2026-09-15; don't assume any given site
+  this plugin targets has one installed, since this plugin isn't Pickit-specific — always run step 0's
+  live detection, never assume based on this file's history). The collapsed block from point 5 is
+  additive context alongside the rendered PNG in the fallback path, not a substitute for it — always
+  render and attach the PNG per points 1-4 when the token is available and native Mermaid isn't.
 
 If a file can't be read this way, skip it and note it as unreadable — don't fail the whole run.
 
@@ -374,6 +666,9 @@ Print a concise summary covering both directions:
   written to `Confluence Sync.md` and unresolved** / Git unavailable, wrote
   `Confluence Sync (remote).md` instead — be explicit about which one happened, this is the part most
   likely to need the user's attention.
+- Comment preservation (steps 3.1/3.2): how many inline comments were snapshotted, and how many (if
+  any) were found orphaned by the markdown push and reconciled as footer comments — or that this step
+  was skipped and why (e.g. missing API token).
 - Notes push (steps 4-5): files merged (noting which were integrated into an existing section vs
   appended under "Sync updates," and for `.mmd` files whether the diagram was rendered and
   attached as a PNG or only had its labels extracted as a fallback — and if only labels, why: the

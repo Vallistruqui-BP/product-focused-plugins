@@ -1,7 +1,7 @@
 {
   "name": "flowchart-builder",
-  "description": "Convert requirements, notes, transcripts, or rough process descriptions into a polished Mermaid (.mmd) flowchart with a synced draw.io (.drawio) copy for free-hand visual editing, curated themes, and auto-validation across both files. Also converts any existing standalone .drawio file (no .mmd yet) into Mermaid, including multi-page files.",
-  "version": "0.6.0",
+  "description": "Convert requirements, notes, transcripts, or rough process descriptions into a polished Mermaid (.mmd) flowchart, with curated themes and auto-validation. Also converts any existing standalone .drawio file (no .mmd yet) into Mermaid, including multi-page files.",
+  "version": "0.7.0",
   "author": {
     "name": "pvallarino"
   },
