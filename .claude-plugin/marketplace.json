@@ -38,7 +38,7 @@
       "name": "botmaker-connect",
       "source": "./plugins/botmaker-connect",
       "description": "Connect Claude Code to Botmaker -- BM-CLI setup for developing Client Actions locally, and a Python client for Botmaker's REST API v2.0 (read WhatsApp templates, channels, messages, and sessions) with the access-token auth header, retry/backoff, and pagination already handled.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ]
 }

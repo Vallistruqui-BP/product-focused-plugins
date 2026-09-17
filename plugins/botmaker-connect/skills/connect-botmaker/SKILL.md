@@ -97,6 +97,27 @@ considering setup done.
   `call(method, path, params=..., json_body=...)` helper, but verify the
   payload shape against the swagger first -- don't invent a request body.
 
+## Querying gotchas (verified against the real API, 2026-09-17)
+
+- **`/sessions` filters don't work.** `from`/`to`, `contact-id`,
+  `contact-name`, `chat-id`, `session-id` are all silently ignored --
+  `get_sessions()` always returns the same fixed set of the most recent
+  sessions (~1000-1100 total) no matter what params you pass. To find a
+  specific contact/date, paginate all of it and filter client-side, or
+  switch to `/messages` instead (see below).
+- **`/messages` filters DO work, but need the right params.** Requires
+  `contact-id` (international format, e.g. `"5491134230676"` -- no `+`,
+  no leading `0`) and `channel-id` (from `get_channels()`). Date range is
+  `from`/`to` (NOT `from-date`/`to-date`), max 1 month per call. To go
+  back further than ~90 days, add `long-term-search=true` -- the 1-month
+  cap still applies per call, so a wide historical search means looping
+  month-by-month across the range and across every channel-id.
+- Practical recipe for "find this contact's conversation(s)": get all
+  `channel-id`s via `get_channels()`, then call `get_messages()` per
+  channel with `contact-id` + a `from`/`to` window, moving the window
+  back a month at a time (adding `long-term-search=true` once you're past
+  ~90 days) until you hit results or give up.
+
 ## Where this came from
 
 The base URL, `access-token` header, retry/backoff policy (exponential,

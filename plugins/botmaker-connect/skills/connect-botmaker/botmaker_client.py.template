@@ -158,13 +158,28 @@ def get_channels(platform: str = "whatsapp", active: bool = True) -> list:
 
 
 def get_messages(**params) -> list:
-    """params: any filter the /messages endpoint accepts (e.g. from-date,
-    to-date, long-term-search). Returns all items across every page."""
+    """Requires `contact-id` (the WhatsApp number in international format,
+    e.g. "5491134230676" -- no "+", no leading "0") and `channel-id`
+    (see get_channels()). Date filtering uses `from`/`to` (ISO 8601, NOT
+    `from-date`/`to-date` despite the sessions-style naming) and the window
+    between them cannot exceed 1 month. To query further back than ~90
+    days, add `long-term-search=true` -- the 1-month-per-call cap still
+    applies, so historical search means looping month-by-month. There is
+    no server-side text/name search: `contact-name` is silently ignored.
+    Returns all items across every page."""
     return list(paginate("/messages", params=params))
 
 
 def get_sessions(**params) -> list:
-    """params: any filter the /sessions endpoint accepts. Always adds
+    """CAUTION: as observed against the real API, `/sessions` silently
+    ignores every filter param (`from`/`to`, `contact-id`, `contact-name`,
+    `chat-id`, `session-id` all tried and ignored) and always returns the
+    same fixed set of the most recent sessions (~1000-1100 across however
+    many pages `nextPage` yields) regardless of what's passed. If you need
+    a specific contact/date, don't rely on filtering here -- either
+    paginate all of it and filter client-side (fine for "did X message
+    recently"), or use get_messages() with contact-id/channel-id instead,
+    which DOES filter server-side. Always adds
     timestamp-precision=milliseconds, matching the real integration."""
     params.setdefault("timestamp-precision", "milliseconds")
     return list(paginate("/sessions", params=params))
